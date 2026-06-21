@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "created_at": "2026-06-21T00:00:00",
+  "updated_at": "2026-06-21T00:00:00",
+  "text_format": {
+    "font": "Poppins-Bold",
+    "font_id": "7312373689708712449",
+    "font_path": "C:\\Users\\user2\\AppData\\Local\\CapCut\\User Data\\Cache\\effect\\7312373689708712449\\d090413fb1d5672cdf7177fea62fbccd\\Poppins-Bold.ttf",
+    "size": 30,
+    "color": "#FFFFFF",
+    "bold": true,
+    "italic": false,
+    "shadow": {
+      "enabled": true,
+      "color": "#000000",
+      "alpha": 0.33,
+      "distance": 17.0,
+      "angle": -115.9
+    }
+  },
+  "visual_settings": {
+    "scale": 1.67,
+    "anchor_left": -0.25,
+    "anchor_right": 0.25,
+    "char_width": 0.15,
+    "step_y_short": 0.05,
+    "step_y_medium": 0.08,
+    "step_y_long": 0.10,
+    "limit_y_top": -0.70,
+    "limit_y_bottom": 0.70,
+    "max_words_per_block": 5,
+    "overlap_threshold_us": 150000
+  },
+  "capcut_paths": {
+    "drafts_folder": "C:\\Users\\user2\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft",
+    "cache_folder": "C:\\Users\\user2\\AppData\\Local\\CapCut\\User Data\\Cache"
+  },
+  "projects": {},
+  "editing_history": [],
+  "auto_suggestions": true,
+  "last_used": null
+}
