@@ -1,0 +1,8 @@
+{
+  "default_profile": {
+    "username": "user",
+    "theme": "light",
+    "language": "en",
+    "notifications": true
+  }
+}

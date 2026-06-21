@@ -1,0 +1,23 @@
+{
+  "app_name": "My Python App",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "A brief description of your application.",
+  "settings": {
+    "theme": "light",
+    "language": "en",
+    "notifications": true,
+    "auto_save": false
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "your_username",
+    "password": "your_password",
+    "database_name": "my_database"
+  },
+  "api": {
+    "base_url": "https://api.example.com",
+    "timeout": 30
+  }
+}
