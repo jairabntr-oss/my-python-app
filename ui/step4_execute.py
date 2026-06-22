@@ -148,7 +148,7 @@ class Step4Frame(ctk.CTkFrame):
             self.after(0, self._log, f"   Oraciones: {len(oraciones)}")
             self.after(0, lambda: self.progress.set(0.5))
 
-            resultado = service.generar_completo(draft_name, oraciones, ruta_sonido)
+            resultado = service.generar_completo(draft_name, oraciones, ruta_sonido, modo_clicks=modo)
 
             self.after(0, lambda: self.progress.set(1.0))
 
