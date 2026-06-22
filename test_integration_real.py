@@ -63,8 +63,8 @@ def main():
         profile = {
             "text_size": 30,
             "text_color": "#FFFFFF",
-            "scale_x": 1.67,
-            "scale_y": 1.67,
+            "scale_x": 3.037,
+            "scale_y": 3.037,
             "shadow_enabled": True,
             "shadow_alpha": 0.33
         }

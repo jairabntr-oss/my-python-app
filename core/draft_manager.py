@@ -1,13 +1,12 @@
 import json
 import shutil
 import os
-import hashlib
 import threading
 from pathlib import Path
 from datetime import datetime
 from config import PATHS, AUTO_CAPTION_NAMES
 from core.logger import logger
-from core.exceptions import InvalidDraftError, BackupError, AnalysisError
+from core.exceptions import InvalidDraftError, BackupError
 
 class DraftManager:
     PREFIJO_RESIDUAL = "AUTO_"

@@ -9,6 +9,15 @@ Basado en análisis de los drafts **"tiggo 4"** y **"arrizzo 8"** (junio 2026).
 - **arrizzo 8**: variable de 1.0 a 1.84, promedio ~1.5
 - **Recomendación**: usar 1.67 como valor estándar
 
+> ⚠️ **NOTA DE CONFIGURACIÓN (importante):** el código (`config/settings.json`,
+> `config/user_profile.json` y el default de `LearningEngine`) está unificado en
+> **scale = 3.037 (~303%)**, que es la calibración validada del proyecto original
+> "entrv fede baic" (ver `HANDOFF_PROYECTO_SUBTITULOS.md`). Antes la ruta de la
+> UI usaba 3.037 y la de la CLI usaba 1.67, así que el texto salía de distinto
+> tamaño según por dónde se generara. Ahora coinciden las tres. Si tu estilo
+> manual real es el de 1.67 medido arriba, cambiá el valor **en los tres lugares
+> a la vez** para no reintroducir el desfasaje.
+
 ### 2. Fuente
 - **Nombre**: Poppins-Bold
 - **Font ID**: 7312373689708712449

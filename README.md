@@ -98,6 +98,21 @@ Edita `config/user_profile.json` para ajustar:
 - **Escala y posicionamiento** (zigzag, anclas).
 - **Ruta de drafts** de CapCut en tu sistema.
 
+> ⚠️ **Escala unificada:** el valor `scale` debe coincidir en `config/settings.json`,
+> `config/user_profile.json` y el default de `LearningEngine`. Actualmente está en
+> **3.037 (~303%)**, la calibración validada del proyecto original. Si tu estilo
+> manual usa otra escala, cambiala en los tres lugares (ver
+> `ANALISIS_FORMATO_ESTILO.md`).
+
+## Dos formas de generar (mismo resultado)
+- **UI** (`app.py`) y **test de integración**: usan `DraftService` +
+  `SubtitleEngine`, leyendo el perfil de `settings.json`.
+- **CLI** (`generar_subtitulos_baic_v5.py`): usa `CapcutEngine` +
+  `LearningEngine`, leyendo `user_profile.json`.
+
+Ambas rutas comparten el mismo parser (`AutocaptionExtractor`) y el mismo
+motor de posicionamiento, por lo que producen subtítulos equivalentes.
+
 ## Contributing
 Las contribuciones son bienvenidas. Por favor abre un issue o envía un pull request.
 

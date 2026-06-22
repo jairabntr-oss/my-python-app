@@ -1,8 +1,36 @@
 {
-  "default_profile": {
-    "username": "user",
-    "theme": "light",
-    "language": "en",
-    "notifications": true
+  "_comment": "Plantilla de perfil de estilo POR DEFECTO (referencia/reset). Refleja los valores que genera LearningEngine._create_default_profile(). user_profile.json es el perfil ACTIVO; este queda como copia limpia para restaurar. scale=3.037 debe coincidir con settings.json.",
+  "text_format": {
+    "font": "Poppins-Bold",
+    "font_id": "7312373689708712449",
+    "font_path": "",
+    "size": 30,
+    "color": "#FFFFFF",
+    "bold": true,
+    "italic": false,
+    "shadow": {
+      "enabled": true,
+      "color": "#000000",
+      "alpha": 0.33,
+      "distance": 17.0,
+      "angle": -115.9
+    }
+  },
+  "visual_settings": {
+    "scale": 3.037,
+    "anchor_left": -0.20,
+    "anchor_right": 0.20,
+    "char_width": 0.15,
+    "step_y_short": 0.05,
+    "step_y_medium": 0.08,
+    "step_y_long": 0.10,
+    "limit_y_top": -0.70,
+    "limit_y_bottom": 0.70,
+    "max_words_per_block": 5,
+    "overlap_threshold_us": 150000
+  },
+  "capcut_paths": {
+    "drafts_folder": "",
+    "cache_folder": ""
   }
 }

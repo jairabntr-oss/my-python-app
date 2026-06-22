@@ -7,12 +7,21 @@ from pathlib import Path
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Retorna un logger configurado."""
+    """Retorna un logger configurado.
+
+    Idempotente: si el logger ya tiene handlers (porque get_logger se llamó
+    antes con el mismo nombre), los reutiliza en vez de agregar handlers
+    duplicados (que harían que cada línea de log se imprima N veces).
+    """
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
+
     log_path = Path("logs")
     log_path.mkdir(exist_ok=True)
-    
-    logger = logging.getLogger(name)
+
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
     
     # Handler para archivo
     file_handler = logging.FileHandler(log_path / "app.log")

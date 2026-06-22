@@ -6,7 +6,6 @@ Extrae palabras con timings exactos para procesamiento posterior.
 
 import json
 from typing import List, Dict, Tuple, Optional
-from pathlib import Path
 
 
 class CapcutParser:

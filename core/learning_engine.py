@@ -5,7 +5,7 @@ LearningEngine - Aprende tus patrones de edición y los guarda para reutilizar
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 class LearningEngine:
@@ -55,10 +55,16 @@ class LearningEngine:
             },
             
             # Configuración visual (zigzag, posicionamiento, etc.)
+            # NOTA: scale=3.037 (~303%) y anclas ±0.20 son la calibración
+            # validada en el handoff ("entrv fede baic"). settings.json,
+            # user_profile.json y este default deben coincidir, si no la UI y
+            # la CLI generan texto de tamaño distinto. Si tu estilo manual real
+            # usa otra escala (p.ej. 1.67, ver ANALISIS_FORMATO_ESTILO.md),
+            # cambialo en los TRES lugares a la vez.
             "visual_settings": {
-                "scale": 1.67,  # 167%
-                "anchor_left": -0.25,
-                "anchor_right": 0.25,
+                "scale": 3.037,  # ~303%
+                "anchor_left": -0.20,
+                "anchor_right": 0.20,
                 "char_width": 0.15,
                 "step_y_short": 0.05,   # 1-3 letras
                 "step_y_medium": 0.08,  # 4-7 letras

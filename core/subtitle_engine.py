@@ -16,7 +16,7 @@ Resuelve errores del handoff:
 """
 
 import json
-from typing import List, Dict, Tuple, Optional
+from typing import List, Tuple, Optional
 
 try:
     import pycapcut as cc

@@ -3,7 +3,6 @@ CapcutEngine - Integración con CapCut para generar subtítulos automáticos
 Usa pycapcut para acceder a los drafts y aplicar el formato aprendido
 """
 
-import json
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 from .learning_engine import LearningEngine
@@ -66,55 +65,33 @@ class CapcutEngine:
             return None
     
     def extract_captions_from_draft(self, project_name: str) -> List[List[Dict[str, Any]]]:
-        """Extrae los captions del draft_content.json."""
+        """Extrae los captions del draft_content.json.
+
+        Delega en AutocaptionExtractor, la ÚNICA fuente de verdad para
+        parsear drafts (lee content como JSON string + words[] en
+        microsegundos y filtra solo el auto-caption sin editar).
+
+        Antes este método parseaba `track["clips"][...]["words"]` con campos
+        `startTime`/`endTime`, una estructura que NO existe en el
+        draft_content.json real de CapCut (los segmentos viven en
+        `track["segments"]` y las palabras en `materials.texts[].content`).
+        Por eso devolvía siempre [] y la CLI decía "No se encontraron
+        captions".
+        """
+        content_file = self.get_drafts_folder() / project_name / "draft_content.json"
+
+        if not content_file.exists():
+            print(f"⚠️  No se encontró {content_file}")
+            return []
+
+        from utils.extract_autocaption import AutocaptionExtractor
+
         try:
-            draft_folder = self.get_drafts_folder()
-            project_path = draft_folder / project_name
-            content_file = project_path / "draft_content.json"
-            
-            if not content_file.exists():
-                print(f"⚠️  No se encontró {content_file}")
-                return []
-            
-            with open(content_file, 'r', encoding='utf-8') as f:
-                content = json.load(f)
-            
-            captions = self._parse_captions_from_content(content)
-            return captions
-        
+            oraciones, _stats = AutocaptionExtractor.extract(str(content_file))
+            return oraciones
         except Exception as e:
             print(f"❌ Error extrayendo captions: {e}")
             return []
-    
-    def _parse_captions_from_content(self, content: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
-        """Parsea la estructura de draft_content.json para obtener palabras con timings."""
-        oraciones = []
-        tracks = content.get("tracks", [])
-        
-        for track in tracks:
-            if track.get("type") != 3:  # type 3 = track de texto
-                continue
-            
-            clips = track.get("clips", [])
-            
-            for clip in clips:
-                word_list = clip.get("words", [])
-                
-                if word_list:
-                    oracion = []
-                    for word_data in word_list:
-                        word_entry = {
-                            "word": word_data.get("text", ""),
-                            "start_us": word_data.get("startTime", 0),
-                            "end_us": word_data.get("endTime", 0)
-                        }
-                        if word_entry["word"]:
-                            oracion.append(word_entry)
-                    
-                    if oracion:
-                        oraciones.append(oracion)
-        
-        return oraciones
     
     def calculate_word_positions(self, word_list: List[Dict[str, Any]], 
                                  y_base: float = 0.0) -> List[Tuple[float, float]]:
@@ -197,8 +174,10 @@ class CapcutEngine:
             inicio_siguiente = oraciones[i + 1][0]["start_us"]
             
             overlap = fin_actual - inicio_siguiente
-            
-            if overlap > umbral:
+
+            # >= para ser consistente con SubtitleEngine._detectar_overlap_real
+            # (antes era > y los dos caminos discrepaban en el caso borde).
+            if overlap >= umbral:
                 pares.append((i, i + 1))
         
         return pares
@@ -321,8 +300,8 @@ class CapcutEngine:
                 "font_path": self.config.get("text_format", {}).get("font_path", ""),
                 "text_size": self.config.get("text_format", {}).get("size", 30),
                 "text_color": self.config.get("text_format", {}).get("color", "#FFFFFF"),
-                "scale_x": self.visual_settings.get("scale", 1.67),
-                "scale_y": self.visual_settings.get("scale", 1.67),
+                "scale_x": self.visual_settings.get("scale", 3.037),
+                "scale_y": self.visual_settings.get("scale", 3.037),
                 "shadow_enabled": self.config.get("text_format", {}).get("shadow", {}).get("enabled", True),
                 "shadow_color": self.config.get("text_format", {}).get("shadow", {}).get("color", "#000000"),
                 "shadow_alpha": self.config.get("text_format", {}).get("shadow", {}).get("alpha", 0.33),
@@ -330,7 +309,7 @@ class CapcutEngine:
                 "shadow_angle": self.config.get("text_format", {}).get("shadow", {}).get("angle", -115.9),
             }
 
-            engine = SubtitleEngine(
+            engine = SubtitleEngine.from_draft(
                 str(self.get_drafts_folder()), project_name, profile
             )
             resultado = engine.generate(oraciones)
