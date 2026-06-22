@@ -80,7 +80,7 @@ def generar_completo(
                 try:
                     tracks_limpiados_audio = cleaner.limpiar_tracks_audio()
                     click_engine = ClickEngine(script, sonido_clicks)
-                    resultado_clicks = click_engine.generate(oraciones_auto)
+                    resultado_clicks = click_engine.generate(oraciones_auto, modo=modo_clicks)
                 except Exception as e:
                     resultado_clicks = {
                         "success": False,
