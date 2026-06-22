@@ -61,8 +61,19 @@ class Cleaner:
         """
         residuales = [
             t for t in self.script.imported_tracks
-            if t.track_type.name == tipo and t.name.startswith(self.PREFIJO)
+            if self._es_tipo_track(t, tipo) and t.name.startswith(self.PREFIJO)
         ]
         for track in residuales:
-            self.script.imported_tracks.remove(track)
+            try:
+                self.script.imported_tracks.remove(track)
+            except ValueError:
+                if hasattr(self.script, "remove_track"):
+                    self.script.remove_track(track)
         return len(residuales)
+
+    def _es_tipo_track(self, track, tipo: str) -> bool:
+        """Compatibilidad entre distintas formas de exponer el tipo de track."""
+        track_type = getattr(track, "track_type", None)
+        if track_type is not None:
+            return getattr(track_type, "name", "") == tipo
+        return getattr(track, "type", "") == tipo

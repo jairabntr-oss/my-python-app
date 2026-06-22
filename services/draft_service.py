@@ -13,7 +13,13 @@ from typing import List, Optional
 from core.subtitle_engine import SubtitleEngine
 from core.click_engine import ClickEngine
 from core.cleaner import Cleaner
-import pycapcut as cc
+
+try:
+    import pycapcut as cc
+    _PYCAPCUT_AVAILABLE = True
+except ImportError:
+    cc = None  # type: ignore[assignment]
+    _PYCAPCUT_AVAILABLE = False
 
 
 class DraftService:
@@ -46,6 +52,9 @@ class DraftService:
             Dict con resultado detallado
         """
         try:
+            if not _PYCAPCUT_AVAILABLE:
+                raise RuntimeError("pycapcut no está instalado. Ejecuta: pip install pycapcut")
+
             # ── 1. Cargar draft (una sola vez) ────────────────────────────────
             draft_folder_obj = cc.DraftFolder(self.draft_folder)
             script = draft_folder_obj.load_template(draft_name)

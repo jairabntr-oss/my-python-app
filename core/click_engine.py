@@ -8,7 +8,13 @@ Resuelve errores del handoff:
 
 import os
 from typing import List
-import pycapcut as cc
+
+try:
+    import pycapcut as cc
+    _PYCAPCUT_AVAILABLE = True
+except ImportError:
+    cc = None  # type: ignore[assignment]
+    _PYCAPCUT_AVAILABLE = False
 
 
 class ClickEngine:
@@ -39,6 +45,9 @@ class ClickEngine:
         Returns:
             Dict con resultado
         """
+        if not _PYCAPCUT_AVAILABLE:
+            raise RuntimeError("pycapcut no está instalado. Ejecuta: pip install pycapcut")
+
         modo = modo or self.MODO_DEFAULT
 
         if not os.path.exists(self.ruta_sonido):

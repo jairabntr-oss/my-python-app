@@ -46,8 +46,8 @@ class DraftManager:
 
     def create_backup(self):
         self.backup_path.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file = self.backup_path / f"draft_backup_{timestamp}.json"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_file = self.backup_path / f"{self.json_path.stem}_backup_{timestamp}.json"
         
         try:
             shutil.copy2(self.json_path, backup_file)

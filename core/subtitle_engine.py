@@ -16,7 +16,13 @@ Resuelve errores del handoff:
 """
 
 from typing import List, Dict, Tuple, Optional
-import pycapcut as cc
+
+try:
+    import pycapcut as cc
+    _PYCAPCUT_AVAILABLE = True
+except ImportError:
+    cc = None  # type: ignore[assignment]
+    _PYCAPCUT_AVAILABLE = False
 
 
 class SubtitleEngine:
@@ -57,6 +63,9 @@ class SubtitleEngine:
             draft_name: nombre del draft (ej: "arrizzo 8")
             profile: diccionario con configuración de estilos
         """
+        if not _PYCAPCUT_AVAILABLE:
+            raise RuntimeError("pycapcut no está instalado. Ejecuta: pip install pycapcut")
+
         folder_obj = cc.DraftFolder(draft_folder)
         script = folder_obj.load_template(draft_name)
         return cls(script, profile)
@@ -281,7 +290,7 @@ class SubtitleEngine:
         scale = self.profile.get("scale_x", 3.037)
         text_size = self.profile.get("text_size", 30)
         color_hex = self.profile.get("text_color", "#FFFFFF")
-        color_rgb = _hex_a_rgb(color_hex)
+        color_rgb = self._hex_to_rgb(color_hex)
 
         estilo = cc.TextStyle(
             size=text_size,
@@ -322,6 +331,17 @@ class SubtitleEngine:
                 total_palabras += 1
 
         return total_palabras
+
+    def _se_solapa(self, intervals: List[Tuple[int, int]], new_start: int, new_end: int) -> bool:
+        """Devuelve True si el intervalo nuevo se solapa con alguno existente."""
+        for start, end in intervals:
+            if new_start < end and new_end > start:
+                return True
+        return False
+
+    def _hex_to_rgb(self, hex_color: str) -> Tuple[float, float, float]:
+        """Convierte color '#RRGGBB' a tupla (r, g, b) en rango [0, 1]."""
+        return _hex_a_rgb(hex_color)
 
 
 # ── Utilidades ────────────────────────────────────────────────────────────────
