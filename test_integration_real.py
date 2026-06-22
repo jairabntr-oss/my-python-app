@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from utils.capcut_parser import CapcutParser
 from services.draft_service import DraftService
-from config import settings
 
 
 def main():
@@ -59,7 +58,7 @@ def main():
         with open("config/settings.json", 'r') as f:
             settings_data = json.load(f)
         profile = settings_data.get("subtitle_style", {})
-    except:
+    except (OSError, json.JSONDecodeError):
         print("⚠️  No se pudo cargar settings.json, usando valores por defecto")
         profile = {
             "text_size": 30,

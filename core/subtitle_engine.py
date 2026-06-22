@@ -11,7 +11,14 @@ Resuelve errores del handoff:
 """
 
 from typing import List, Dict, Tuple, Optional
-import pycapcut as cc
+
+
+try:
+    import pycapcut as cc
+    _PYCAPCUT_AVAILABLE = True
+except ImportError:
+    cc = None  # type: ignore[assignment]
+    _PYCAPCUT_AVAILABLE = False
 
 
 class SubtitleEngine:
@@ -36,7 +43,12 @@ class SubtitleEngine:
             draft_folder: ruta de la carpeta de drafts de CapCut
             draft_name: nombre del draft (ej: "tiggo 4", "arrizzo 8")
             profile: diccionario con configuración de estilos
+
+        Raises:
+            RuntimeError: si pycapcut no está instalado.
         """
+        if not _PYCAPCUT_AVAILABLE:
+            raise RuntimeError("pycapcut no está instalado. Ejecuta: pip install pycapcut")
         self.draft_folder = cc.DraftFolder(draft_folder)
         # ⚠️ CRÍTICO (Error #1): usar load_template, NO duplicate_as_template
         self.script = self.draft_folder.load_template(draft_name)
