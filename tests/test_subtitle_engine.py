@@ -75,6 +75,38 @@ class TestBlockSplitting(unittest.TestCase):
         for bloque in bloques:
             self.assertLessEqual(len(bloque["palabras"]), 5, "Cada bloque ≤5 palabras")
 
+    def test_oracion_larga_respeta_max_palabras_configurable(self):
+        """Usa max_palabras_por_bloque configurable desde perfil/layout."""
+        engine = SubtitleEngine(script=None, profile={"max_palabras_por_bloque": 3})
+        oracion = [
+            {"word": f"palabra{i}", "start_us": i * 100_000, "end_us": (i + 1) * 100_000}
+            for i in range(7)
+        ]
+
+        bloques = engine._dividir_oracion(oracion, idx=0, es_overlap=False)
+        for bloque in bloques:
+            self.assertLessEqual(len(bloque["palabras"]), 3, "Cada bloque ≤3 palabras")
+
+
+class TestLayoutConfig(unittest.TestCase):
+    """Tests para layout configurable de posiciones."""
+
+    def test_anclas_configurables_se_aplican_en_posiciones(self):
+        engine = SubtitleEngine(
+            script=None,
+            profile={"ancla_izquierda": -0.1, "ancla_derecha": 0.3, "ancho_por_caracter": 0.05},
+        )
+        bloques = [
+            {
+                "idx_oracion": 0,
+                "palabras": [{"word": "hola", "start_us": 0, "end_us": 100_000}],
+                "es_overlap": False,
+            }
+        ]
+
+        posiciones = engine._calcular_posiciones(bloques, pares_overlap=[])
+        self.assertEqual(posiciones["0_0"][0], -0.1)
+
 
 class TestSeSolapa(unittest.TestCase):
     """Tests para detección de solapamiento temporal entre segmentos."""

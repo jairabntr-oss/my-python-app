@@ -130,8 +130,10 @@ class Step2Frame(ctk.CTkFrame):
             )
             return
 
-        # Propagar el perfil actualizado a main_window
-        self.main_window.style_profile = settings.get("subtitle_style", {})
+        # Propagar perfil + layout actualizado a main_window
+        profile = dict(settings.get("subtitle_style", {}))
+        profile.update(settings.get("layout", {}))
+        self.main_window.style_profile = profile
 
         self.status_label.configure(
             text="✅ Estilo guardado.", text_color=COLORS["success"]

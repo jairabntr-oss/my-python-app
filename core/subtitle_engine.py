@@ -49,6 +49,12 @@ class SubtitleEngine:
         """
         self.script = script
         self.profile = profile
+        self.max_palabras_por_bloque = int(
+            profile.get("max_palabras_por_bloque", self.MAX_PALABRAS_POR_BLOQUE)
+        )
+        self.ancla_izquierda = float(profile.get("ancla_izquierda", self.ANCLA_IZQUIERDA))
+        self.ancla_derecha = float(profile.get("ancla_derecha", self.ANCLA_DERECHA))
+        self.ancho_por_caracter = float(profile.get("ancho_por_caracter", self.ANCHO_POR_CARACTER))
 
     # ── Fábrica de conveniencia ────────────────────────────────────────────────
 
@@ -148,7 +154,8 @@ class SubtitleEngine:
         for idx_or, oracion in enumerate(oraciones):
             es_overlap = any(idx_or in par for par in pares_overlap)
 
-            if len(oracion) <= self.MAX_PALABRAS_POR_BLOQUE:
+            max_palabras = getattr(self, "max_palabras_por_bloque", self.MAX_PALABRAS_POR_BLOQUE)
+            if len(oracion) <= max_palabras:
                 bloques.append({
                     "idx_oracion": idx_or,
                     "palabras": oracion,
@@ -166,7 +173,8 @@ class SubtitleEngine:
         inicio = 0
 
         while inicio < len(oracion):
-            fin = min(inicio + self.MAX_PALABRAS_POR_BLOQUE, len(oracion))
+            max_palabras = getattr(self, "max_palabras_por_bloque", self.MAX_PALABRAS_POR_BLOQUE)
+            fin = min(inicio + max_palabras, len(oracion))
 
             if fin < len(oracion):
                 pausa_idx = self._buscar_pausa_para_corte(oracion, inicio, fin)
@@ -225,9 +233,12 @@ class SubtitleEngine:
 
             for i, palabra_data in enumerate(bloque["palabras"]):
                 palabra = palabra_data["word"]
-                ancho_palabra = len(palabra) * self.ANCHO_POR_CARACTER
+                ancho_por_caracter = getattr(self, "ancho_por_caracter", self.ANCHO_POR_CARACTER)
+                ancho_palabra = len(palabra) * ancho_por_caracter
 
-                x = self.ANCLA_IZQUIERDA if i % 2 == 0 else self.ANCLA_DERECHA
+                ancla_izquierda = getattr(self, "ancla_izquierda", self.ANCLA_IZQUIERDA)
+                ancla_derecha = getattr(self, "ancla_derecha", self.ANCLA_DERECHA)
+                x = ancla_izquierda if i % 2 == 0 else ancla_derecha
 
                 if len(palabra) >= 8:
                     x *= 0.5

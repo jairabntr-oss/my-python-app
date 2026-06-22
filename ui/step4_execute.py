@@ -129,7 +129,8 @@ class Step4Frame(ctk.CTkFrame):
             # Cargar perfil
             profile = getattr(self.main_window, "style_profile", None)
             if not profile:
-                profile = app_settings.get("subtitle_style", {})
+                profile = dict(app_settings.get("subtitle_style", {}))
+                profile.update(app_settings.get("layout", {}))
 
             ruta_sonido = getattr(self.main_window, "ruta_sonido", None)
             modo = getattr(self.main_window, "modo_clicks", "2_por_oracion")
