@@ -35,8 +35,13 @@ class DraftService:
         self.draft_folder = draft_folder
         self.profile = profile
 
-    def generar_completo(self, draft_name: str, oraciones_auto: List[List[dict]],
-                         sonido_clicks: Optional[str] = None) -> dict:
+def generar_completo(
+    self,
+    draft_name: str,
+    oraciones_auto: List[List[dict]],
+    sonido_clicks: Optional[str] = None,
+    modo_clicks: Optional[str] = None,
+) -> dict:
         """Ejecuta el pipeline completo: limpia → subtítulos → clicks.
 
         Usa UN ÚNICO script compartido para todas las operaciones,
