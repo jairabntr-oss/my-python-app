@@ -15,6 +15,7 @@ Resuelve errores del handoff:
 - Error #9: Umbral ≥150ms para overlap real
 """
 
+import json
 from typing import List, Dict, Tuple, Optional
 
 try:
@@ -114,12 +115,18 @@ class SubtitleEngine:
         # 5. Guardar
         self.script.save()
 
+        # 6. Inyectar sombra y fuente (pycapcut.TextStyle no los soporta;
+        # hay que parchear el JSON ya guardado, igual que documenta el
+        # handoff original del usuario para "entrv fede baic")
+        n_parcheados = self._inyectar_estilo_avanzado()
+
         return {
             "success": True,
             "total_palabras": total_palabras,
             "total_bloques": len(bloques),
             "pares_overlap": len(pares_overlap),
             "total_tracks": total_tracks,
+            "materiales_con_sombra": n_parcheados,
             "track_name": self.TRACK_PREFIX + "*",
         }
 
@@ -314,6 +321,73 @@ class SubtitleEngine:
 
         return posiciones
 
+    def _inyectar_estilo_avanzado(self) -> int:
+        """Parchea sombra y fuente en los materiales de texto recien creados.
+
+        pycapcut.TextStyle no expone sombra ni una forma de fijar font_path
+        a nivel de material (Error #4 del handoff original: "pyCapCut no
+        tiene API de alto nivel para esto, hay que inyectar el JSON directo
+        despues de crear el segmento"). Por eso este paso reabre el
+        draft_content.json YA GUARDADO, parchea los campos a nivel raiz
+        de cada material generado por esta corrida, y vuelve a guardar.
+
+        Valores default (shadow_alpha=0.33, shadow_angle=-115.9,
+        shadow_distance=17.0) tomados de la calibracion documentada en
+        PLAN_TECNICO_COMPLETO.md / config/user_profile.json.
+
+        Returns:
+            Cantidad de materiales parcheados.
+        """
+        ids = set(getattr(self, "_material_ids_generados", []) or [])
+        if not ids:
+            return 0
+
+        save_path = getattr(self.script, "save_path", None)
+        if not save_path:
+            return 0
+
+        with open(save_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        shadow_enabled = self.profile.get("shadow_enabled", True)
+        shadow_color = self.profile.get("shadow_color", "#000000")
+        shadow_alpha = float(self.profile.get("shadow_alpha", 0.33))
+        shadow_distance = float(self.profile.get("shadow_distance", 17.0))
+        shadow_angle = float(self.profile.get("shadow_angle", -115.9))
+        shadow_smoothing = float(self.profile.get("shadow_smoothing", 0.45))
+        font_path = self.profile.get("font_path")  # ej. ruta a Poppins-Bold.ttf
+        font_name = self.profile.get("font_name")
+        text_size = float(self.profile.get("text_size", 30))
+
+        n = 0
+        for mat in data.get("materials", {}).get("texts", []) or []:
+            if mat.get("id") not in ids:
+                continue
+
+            # text_size a nivel raiz (distinto del 'size' interno en content.styles)
+            mat["text_size"] = text_size
+
+            if shadow_enabled:
+                mat["has_shadow"] = True
+                mat["shadow_color"] = shadow_color
+                mat["shadow_alpha"] = shadow_alpha
+                mat["shadow_distance"] = shadow_distance
+                mat["shadow_angle"] = shadow_angle
+                mat["shadow_smoothing"] = shadow_smoothing
+
+            if font_path:
+                mat["font_path"] = font_path
+            if font_name:
+                mat["font_name"] = font_name
+
+            n += 1
+
+        if n:
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+
+        return n
+
     # ── Creación de segmentos ─────────────────────────────────────────────────
 
     def _asegurar_track(self, track_name: str) -> None:
@@ -345,7 +419,10 @@ class SubtitleEngine:
         color_rgb = self._hex_to_rgb(color_hex)
         bold = self.profile.get("bold", True)
 
-        estilo = cc.TextStyle(size=text_size, align=1, color=color_rgb, bold=bold)
+        estilo = cc.TextStyle(
+            size=text_size, align=1, color=color_rgb, bold=bold,
+            auto_wrapping=True,  # hace que pycapcut guarde type:"subtitle"
+        )
 
         # 1) construir todos los segmentos con timing ACUMULATIVO
         items = []  # (start_us, end_us, palabra, x, y)
@@ -386,6 +463,7 @@ class SubtitleEngine:
 
         # 4) crear y agregar los segmentos
         total_palabras = 0
+        material_ids_creados = []
         for (start_us, end_us, palabra, x, y), ti in zip(items, asignacion):
             clip = cc.ClipSettings(
                 scale_x=scale, scale_y=scale_y, transform_x=x, transform_y=y,
@@ -397,7 +475,10 @@ class SubtitleEngine:
                 clip_settings=clip,
             )
             self.script.add_segment(segmento, f"{self.TRACK_PREFIX}{ti}")
+            material_ids_creados.append(segmento.material_id)
             total_palabras += 1
+
+        self._material_ids_generados = material_ids_creados
 
         return total_palabras, total_tracks
 

@@ -49,3 +49,44 @@ try:
         settings = json.load(_f)
 except Exception:
     settings = {}
+
+
+def cargar_perfil_estilo() -> dict:
+    """Carga config/user_profile.json (el estilo REAL calibrado por el
+    usuario, ver PLAN_TECNICO_COMPLETO.md) y lo traduce al formato plano
+    que espera SubtitleEngine. Si no existe o esta incompleto, cae en los
+    mismos defaults documentados (Poppins-Bold, sombra calibrada).
+
+    Sin esto, ningun script estaba leyendo user_profile.json: el motor
+    usaba valores sueltos hardcodeados y el resultado salia sin sombra ni
+    fuente custom (texto "feo/default" en CapCut).
+    """
+    path = _BASE_DIR / "config" / "user_profile.json"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            perfil = json.load(f)
+    except Exception:
+        perfil = {}
+
+    tf = perfil.get("text_format", {}) or {}
+    sh = tf.get("shadow", {}) or {}
+    vs = perfil.get("visual_settings", {}) or {}
+
+    return {
+        "text_size": tf.get("size", 30),
+        "text_color": tf.get("color", "#FFFFFF"),
+        "bold": tf.get("bold", True),
+        "font_path": tf.get("font_path"),
+        "font_name": tf.get("font"),
+        "scale_x": vs.get("scale", 3.037),
+        "scale_y": vs.get("scale", 3.037),
+        "shadow_enabled": sh.get("enabled", True),
+        "shadow_color": sh.get("color", "#000000"),
+        "shadow_alpha": sh.get("alpha", 0.33),
+        "shadow_distance": sh.get("distance", 17.0),
+        "shadow_angle": sh.get("angle", -115.9),
+        "ancla_izquierda": vs.get("anchor_left", -0.20),
+        "ancla_derecha": vs.get("anchor_right", 0.20),
+        "ancho_por_caracter": vs.get("char_width", 0.15),
+        "max_palabras_por_bloque": vs.get("max_words_per_block", 5),
+    }
