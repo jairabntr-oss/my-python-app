@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 
 from core.draft_manager import DraftManager
+from utils.helpers import detectar_multiplicador_tiempo
 
 
 class AutocaptionExtractor:
@@ -93,22 +94,10 @@ class AutocaptionExtractor:
     def _detectar_multiplicador(median_dur_raw: int, max_raw: int, duration_us: int) -> int:
         """Factor para llevar timings crudos a microsegundos.
 
-        Desambigua us/ms/s usando la duracion TIPICA de una palabra hablada
-        (~0.3s). Una palabra cruda de 400 unidades son 0.0004s si fueran us
-        (absurdo) o 0.4s si fueran ms (real) -> elige ms.
+        Delega en utils.helpers.detectar_multiplicador_tiempo (compartida
+        con DraftManager para no duplicar la heuristica us/ms/s).
         """
-        candidatos = (1, 1000, 1_000_000)
-        TARGET_US = 300_000  # duracion plausible de una palabra (~0.3s)
-        if median_dur_raw and median_dur_raw > 0:
-            return min(candidatos, key=lambda m: abs(median_dur_raw * m - TARGET_US))
-        # respaldo: por magnitud del maximo vs duracion del video
-        if duration_us and duration_us > 0 and max_raw > 0:
-            for mult in candidatos:
-                if max_raw * mult <= duration_us * 1.5:
-                    return mult
-        if max_raw > 10_000_000:
-            return 1
-        return 1000
+        return detectar_multiplicador_tiempo(median_dur_raw, max_raw, duration_us)
 
     @staticmethod
     def _extraer_por_arrays(materials_texts, draft, stats) -> List[List[Dict]]:

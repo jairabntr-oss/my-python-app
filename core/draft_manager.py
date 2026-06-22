@@ -7,6 +7,7 @@ from datetime import datetime
 from config import PATHS, AUTO_CAPTION_NAMES
 from core.logger import logger
 from core.exceptions import InvalidDraftError, BackupError
+from utils.helpers import detectar_multiplicador_tiempo
 
 class DraftManager:
     PREFIJO_RESIDUAL = "AUTO_"
@@ -62,36 +63,120 @@ class DraftManager:
         try: return json.loads(content_str)
         except json.JSONDecodeError: return None
 
-    def _clasificar_material_texto(self, text_mat):
+    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1):
+        """Clasifica un material de texto en auto_sin_editar / auto_ya_estilado
+        / texto_manual.
+
+        Soporta DOS formatos de CapCut observados con datos reales:
+        - Formato viejo: 'words' vive DENTRO de content (JSON string), como
+          una lista de dicts {"text":..., "start_time"/"start_us":...} YA EN
+          MICROSEGUNDOS (no necesita conversion).
+        - Formato nuevo (CapCut 8.8+, confirmado con datos reales de
+          "mariaaa baic"): 'words' es un campo SEPARADO a nivel RAIZ del
+          material, como arrays paralelos {"start_time":[...], "end_time":
+          [...], "text":[...]} en MILISEGUNDOS (no microsegundos), e incluye
+          elementos de solo espacio (" ") como separadores entre palabras
+          que hay que descartar. mult_tiempo_raiz convierte esos valores
+          crudos a microsegundos (ver analyze(), que lo calcula UNA vez para
+          todo el draft con utils.helpers.detectar_multiplicador_tiempo).
+        """
         try:
             content = self._parse_content(text_mat.get("content"))
-            if content is None: return "texto_manual", None
-            
-            words = content.get("words", [])
-            if not words: return "texto_manual", None
-            
-            texto_de_words = "".join(w.get("text", "") for w in words)
-            texts_list = content.get("texts") or []
-            texto_visible = "".join(texts_list) if isinstance(texts_list, list) else ""
-            
+
             palabras_con_timing = []
-            for w in words:
-                palabra = w.get("text", "").strip()
-                if not palabra: continue
-                
-                start = w.get("start_time")
-                if start is None: start = w.get("start_us", 0)
-                end = w.get("end_time")
-                if end is None: end = w.get("end_us", 0)
-                
-                palabras_con_timing.append({"word": palabra, "start_us": int(start), "end_us": int(end)})
-            
-            if texto_de_words.strip() == texto_visible.strip():
-                return "auto_sin_editar", palabras_con_timing
-            else:
-                return "auto_ya_estilado", palabras_con_timing
+
+            # ── Formato nuevo: words a nivel raiz, arrays paralelos ────────
+            words_raiz = text_mat.get("words")
+            if isinstance(words_raiz, dict) and words_raiz.get("text"):
+                starts = words_raiz.get("start_time", []) or []
+                ends = words_raiz.get("end_time", []) or []
+                for i, palabra_raw in enumerate(words_raiz.get("text", [])):
+                    palabra = (palabra_raw or "").strip()
+                    if not palabra:
+                        continue
+                    start_raw = starts[i] if i < len(starts) else 0
+                    end_raw = ends[i] if i < len(ends) else 0
+                    palabras_con_timing.append({
+                        "word": palabra,
+                        "start_us": int(start_raw) * mult_tiempo_raiz,
+                        "end_us": int(end_raw) * mult_tiempo_raiz,
+                    })
+                if palabras_con_timing:
+                    # recognize_task_id poblado = viene de reconocimiento de
+                    # voz automatico real (no texto tipeado a mano). Mismo
+                    # criterio que ya usa Cleaner.limpiar_autocaption_nativo().
+                    if text_mat.get("recognize_task_id"):
+                        return "auto_sin_editar", palabras_con_timing
+                    return "auto_ya_estilado", palabras_con_timing
+
+            # ── Formato viejo: words dentro de content, lista de dicts,
+            #    YA en microsegundos (start_us/end_us), sin multiplicador ──
+            if content is not None:
+                words = content.get("words", [])
+                if words:
+                    texto_de_words = "".join(w.get("text", "") for w in words)
+                    texts_list = content.get("texts") or []
+                    texto_visible = "".join(texts_list) if isinstance(texts_list, list) else ""
+
+                    for w in words:
+                        palabra = w.get("text", "").strip()
+                        if not palabra:
+                            continue
+
+                        start = w.get("start_time")
+                        if start is None: start = w.get("start_us", 0)
+                        end = w.get("end_time")
+                        if end is None: end = w.get("end_us", 0)
+
+                        palabras_con_timing.append({"word": palabra, "start_us": int(start), "end_us": int(end)})
+
+                    if texto_de_words.strip() == texto_visible.strip():
+                        return "auto_sin_editar", palabras_con_timing
+                    else:
+                        return "auto_ya_estilado", palabras_con_timing
+
+            return "texto_manual", None
         except Exception:
             return "texto_manual", None
+
+    def _calcular_multiplicador_raiz(self, texts_list, duration_us: int) -> int:
+        """Calcula, para TODO el draft, el multiplicador que convierte los
+        timings crudos de 'words' a nivel raiz (formato nuevo de CapCut) a
+        microsegundos. Usa la misma heuristica que utils.helpers.
+        detectar_multiplicador_tiempo (mediana de duracion de palabra
+        ~0.3s), mirando todos los materiales de una sola vez en vez de
+        adivinar por separado en cada uno (mas estable con pocas palabras).
+        """
+        max_raw = 0
+        duraciones = []
+        for mat in (texts_list or []):
+            wd = mat.get("words")
+            if not isinstance(wd, dict):
+                continue
+            starts = wd.get("start_time", []) or []
+            ends = wd.get("end_time", []) or []
+            for v in ends or starts:
+                try:
+                    max_raw = max(max_raw, int(v))
+                except (TypeError, ValueError):
+                    pass
+            for a, b in zip(starts, ends):
+                try:
+                    d = int(b) - int(a)
+                    if d > 0:
+                        duraciones.append(d)
+                except (TypeError, ValueError):
+                    pass
+
+        if not duraciones and max_raw == 0:
+            return 1  # sin datos del formato nuevo en este draft
+
+        median_dur = 0
+        if duraciones:
+            duraciones.sort()
+            median_dur = duraciones[len(duraciones) // 2]
+
+        return detectar_multiplicador_tiempo(median_dur, max_raw, duration_us)
 
     def analyze(self):
         if not self.data: self.load()
@@ -110,6 +195,13 @@ class DraftManager:
         total_segmentos_texto = 0
         total_segmentos_audio = 0
 
+        # Calcular UNA vez para todo el draft el multiplicador que convierte
+        # los timings crudos del formato nuevo (words a nivel raiz) a
+        # microsegundos. Mismo criterio que utils.extract_autocaption usa
+        # para el camino de respaldo (duracion tipica de palabra ~0.3s).
+        duration_us = int(self.data.get("duration", 0) or 0)
+        mult_tiempo_raiz = self._calcular_multiplicador_raiz(texts_list, duration_us)
+
         tracks_list = self.data.get("tracks") or []
         for track in tracks_list:
             track_name = track.get("name", "") or ""
@@ -124,7 +216,21 @@ class DraftManager:
             elif track_type == "audio": total_segmentos_audio += len(segmentos)
             
             es_track_autocaption = track_name in AUTO_CAPTION_NAMES
-            es_track_manual = (not es_track_autocaption) and (not track_name.startswith(self.PREFIJO_RESIDUAL))
+            # OJO: antes, cualquier track con name="" (formato nuevo de
+            # CapCut 8.8+, confirmado con datos reales: el track de
+            # auto-caption recien generado tiene name vacio) se trataba como
+            # "manual" SOLO por el nombre, sin mirar el contenido real -> se
+            # descartaba de entrada con auto_ya_estilado.append([]) antes de
+            # llegar a _clasificar_material_texto. Ahora un track sin nombre
+            # NO se asume manual; se deja que _clasificar_material_texto
+            # decida por el contenido real de cada material (usa
+            # recognize_task_id, que es la marca real de reconocimiento de
+            # voz automatico, igual que Cleaner.limpiar_autocaption_nativo()).
+            es_track_con_nombre_manual = (
+                bool(track_name)
+                and not es_track_autocaption
+                and not track_name.startswith(self.PREFIJO_RESIDUAL)
+            )
             
             if track_type == "text":
                 for seg in segmentos:
@@ -136,11 +242,11 @@ class DraftManager:
                     
                     materiales_ya_contados.add(mat_id)
                     
-                    if es_track_manual:
+                    if es_track_con_nombre_manual:
                         auto_ya_estilado.append([])
                         continue
                     
-                    categoria, palabras = self._clasificar_material_texto(text_mat)
+                    categoria, palabras = self._clasificar_material_texto(text_mat, mult_tiempo_raiz)
                     if categoria == "auto_sin_editar" and palabras:
                         auto_sin_editar.append(palabras)
                     elif categoria == "auto_ya_estilado":
@@ -154,7 +260,8 @@ class DraftManager:
                         else:
                             texto_manual.append(text_mat.get("content", "")[:50] + "...")
 
-        duration_us = self.data.get("duration", 0) or 0
+        # duration_us ya se calculo arriba (linea 163) para detectar el
+        # multiplicador de tiempo del formato nuevo.
         return {
             "oraciones_auto_sin_editar": auto_sin_editar,
             "cantidad_oraciones_procesables": len(auto_sin_editar),

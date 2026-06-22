@@ -38,6 +38,13 @@ class SubtitleEngine:
     ANCLA_IZQUIERDA = -0.20
     ANCLA_DERECHA = 0.20
     ANCHO_POR_CARACTER = 0.15
+    # PASO_Y_*: separacion vertical entre palabras consecutivas. Estos
+    # valores estan calibrados para el size interno validado (STYLE_SIZE=10
+    # en content.styles + scale ~3.037), que es el que se veia bien en
+    # "entrv fede baic". OJO: si se cambia STYLE_SIZE hay que recalibrar
+    # estos pasos y min_dist_y, porque dependen del alto REAL del texto en
+    # pantalla (el bug de "mariaaa baic" fue justamente size=30 -> texto 3x
+    # mas grande -> desbordaba este espaciado y se amontonaba).
     PASO_Y_CORTO = 0.05   # Palabras 1-3 letras
     PASO_Y_LARGO = 0.10   # Palabras 8+ letras
 
@@ -305,9 +312,11 @@ class SubtitleEngine:
                         distancia_x = abs(x - cx)
                         distancia_y = abs(y_actual - cy)
                         min_dist_x = (ancho_palabra + cw) / 2 + 0.02
-                        # debe ser MENOR que PASO_Y_CORTO (0.05): si no, hasta
-                        # palabras correctamente espaciadas por el avance
-                        # normal "chocan" y se reempujan entre si.
+                        # min_dist_y calibrado para STYLE_SIZE=10 + scale
+                        # ~3.037 (config validada en "entrv fede baic").
+                        # Debe ser menor que PASO_Y_CORTO para no reempujar
+                        # palabras que el avance normal ya separo bien. Si se
+                        # cambia STYLE_SIZE, recalibrar este valor.
                         min_dist_y = 0.04
 
                         if distancia_x < min_dist_x and distancia_y < min_dist_y:
@@ -390,6 +399,8 @@ class SubtitleEngine:
         shadow_smoothing = float(self.profile.get("shadow_smoothing", 0.45))
         font_path = self.profile.get("font_path")  # ej. ruta a Poppins-Bold.ttf
         font_name = self.profile.get("font_name")
+        font_id = self.profile.get("font_id", "")
+        bold = bool(self.profile.get("bold", True))
         text_size = float(self.profile.get("text_size", 30))
 
         n = 0
@@ -412,6 +423,33 @@ class SubtitleEngine:
                 mat["font_path"] = font_path
             if font_name:
                 mat["font_name"] = font_name
+
+            # CRITICO: ademas de font_path/font_name a nivel RAIZ, CapCut
+            # renderiza el texto usando content.styles[N].font. Si ese campo
+            # queda en None, CapCut ignora el font_path de la raiz y cae a la
+            # fuente del SISTEMA (texto fino/generico, no Poppins-Bold).
+            # Confirmado con draft real de "mariaaa baic": styles[0].font era
+            # None y el texto se veia con fuente del sistema. Hay que inyectar
+            # font (con path/id) dentro de CADA style del content.
+            if font_path:
+                content_raw = mat.get("content")
+                if isinstance(content_raw, str):
+                    try:
+                        content_obj = json.loads(content_raw)
+                    except Exception:
+                        content_obj = None
+                    if isinstance(content_obj, dict) and content_obj.get("styles"):
+                        font_obj = {
+                            "id": font_id or "",
+                            "path": font_path,
+                        }
+                        for st in content_obj["styles"]:
+                            if isinstance(st, dict):
+                                st["font"] = font_obj
+                                # asegurar negrita real (Poppins-BOLD)
+                                if bold:
+                                    st["bold"] = True
+                        mat["content"] = json.dumps(content_obj, ensure_ascii=False)
 
             n += 1
 
@@ -447,13 +485,19 @@ class SubtitleEngine:
         """
         scale = self.profile.get("scale_x", 3.037)
         scale_y = self.profile.get("scale_y", scale)
-        text_size = self.profile.get("text_size", 30)
+        # 'size' INTERNO de content.styles: es una escala distinta del
+        # text_size raiz. La config validada de "entrv fede baic" usa
+        # styles.size=10 + text_size=30 (raiz) + scale~3.037. El bug de
+        # "mariaaa baic" fue generar styles.size=30 (=text_size), lo que
+        # hacia el texto ~3x mas grande y causaba amontonamiento + letra
+        # desproporcionada. Ver handoff Error #4.
+        style_size = self.profile.get("style_size", 10)
         color_hex = self.profile.get("text_color", "#FFFFFF")
         color_rgb = self._hex_to_rgb(color_hex)
         bold = self.profile.get("bold", True)
 
         estilo = cc.TextStyle(
-            size=text_size, align=1, color=color_rgb, bold=bold,
+            size=style_size, align=1, color=color_rgb, bold=bold,
             auto_wrapping=True,  # hace que pycapcut guarde type:"subtitle"
         )
 

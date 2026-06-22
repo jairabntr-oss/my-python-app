@@ -71,3 +71,106 @@ class TestDraftManagerAnalyze:
         result = dm.analyze()
         assert result["cantidad_oraciones_procesables"] == 0
         assert result["duracion_video_seg"] == pytest.approx(10.0)
+
+
+class TestDraftManagerFormatoNuevoMaria:
+    """Regresión para el caso real de 'mariaaa baic' (CapCut 8.8+):
+
+    1. El track de auto-caption recién generado tiene name="" -> antes se
+       trataba como texto MANUAL del usuario solo por el nombre vacío, sin
+       mirar el contenido real, y se descartaba sin extraer nada.
+    2. 'words' vive a nivel RAIZ del material (no dentro de content), como
+       arrays paralelos con " " (espacio) como separador de palabras.
+    3. Esos timings están en MILISEGUNDOS, no microsegundos -> sin
+       convertir, los subtítulos generados durarían 1000x menos de lo real.
+    """
+
+    def _draft_formato_nuevo(self, tmp_path, con_recognize_task_id=True):
+        material = {
+            "id": "MAT1",
+            "type": "subtitle",
+            "content": json.dumps({"styles": [{"size": 30}]}),  # sin "words" adentro
+            "words": {
+                "start_time": [0, 240, 240, 440, 560],
+                "end_time": [240, 240, 440, 440, 880],
+                "text": ["vos", " ", "sos", " ", "María"],
+            },
+        }
+        if con_recognize_task_id:
+            material["recognize_task_id"] = "6a38c77c39734201f0f5f244_8_0"
+
+        data = {
+            "duration": 83_500_000,  # microsegundos reales (83.5s)
+            "materials": {"texts": [material]},
+            "tracks": [
+                {"type": "video", "name": "", "segments": []},
+                # name vacio: el caso real que se descartaba como "manual"
+                {"type": "text", "name": "", "segments": [{"material_id": "MAT1"}]},
+            ],
+        }
+        draft_file = tmp_path / "draft_content.json"
+        draft_file.write_text(json.dumps(data), encoding="utf-8")
+        return str(draft_file)
+
+    def test_track_sin_nombre_no_se_descarta_como_manual(self, tmp_path):
+        path = self._draft_formato_nuevo(tmp_path)
+        oraciones, stats = DraftManager.oraciones_desde_json(path)
+
+        assert stats["oraciones"] == 1, "El track con name='' se siguio tratando como manual"
+        assert stats["palabras"] == 3
+
+    def test_espacios_se_descartan_como_separador(self, tmp_path):
+        path = self._draft_formato_nuevo(tmp_path)
+        oraciones, _ = DraftManager.oraciones_desde_json(path)
+
+        palabras = [p["word"] for p in oraciones[0]]
+        assert palabras == ["vos", "sos", "María"]
+        assert " " not in palabras
+
+    def test_timings_se_convierten_de_milisegundos_a_microsegundos(self, tmp_path):
+        path = self._draft_formato_nuevo(tmp_path)
+        oraciones, _ = DraftManager.oraciones_desde_json(path)
+
+        maria = oraciones[0][-1]
+        assert maria["word"] == "María"
+        # En el material real: start_time=560, end_time=880 (MILISEGUNDOS).
+        # Sin la conversion, esto quedaria en 560/880 (microsegundos
+        # absurdamente cortos, <1ms). Con la conversion correcta: 560000us
+        # / 880000us (0.56s / 0.88s).
+        assert maria["start_us"] == 560_000
+        assert maria["end_us"] == 880_000
+
+    def test_sin_recognize_task_id_es_auto_ya_estilado_no_procesable(self, tmp_path):
+        """Si el material NO tiene recognize_task_id, no es auto-caption
+        nativo (podria ser texto ya editado a mano) -> no debe contarse
+        como 'procesable' (oraciones_auto_sin_editar)."""
+        path = self._draft_formato_nuevo(tmp_path, con_recognize_task_id=False)
+        oraciones, stats = DraftManager.oraciones_desde_json(path)
+
+        assert stats["oraciones"] == 0
+
+    def test_formato_viejo_microsegundos_no_se_reconvierte(self, tmp_path):
+        """El formato viejo (words dentro de content, ya en start_us/end_us)
+        no debe pasar por el multiplicador del formato nuevo (que asumiria
+        milisegundos y arruinaria timings ya correctos)."""
+        content_dict = {
+            "words": [
+                {"text": "hola", "start_us": 0, "end_us": 200_000},
+                {"text": "mundo", "start_us": 200_000, "end_us": 500_000},
+            ],
+            "texts": ["hola", "mundo"],
+        }
+        data = {
+            "duration": 1_000_000,
+            "materials": {"texts": [{"id": "MATV", "content": json.dumps(content_dict)}]},
+            "tracks": [
+                {"type": "text", "name": "Reconocimiento de voz",
+                 "segments": [{"material_id": "MATV"}]},
+            ],
+        }
+        draft_file = tmp_path / "draft_content.json"
+        draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+        oraciones, _ = DraftManager.oraciones_desde_json(str(draft_file))
+        assert oraciones[0][0]["end_us"] == 200_000
+        assert oraciones[0][1]["end_us"] == 500_000

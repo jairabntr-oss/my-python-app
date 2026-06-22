@@ -1,0 +1,606 @@
+From 69b71691279f5f35c8361e6419d2f918f31c7b68 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Mon, 22 Jun 2026 16:21:37 +0000
+Subject: [PATCH] Fix DraftManager: no reconoce auto-caption en formato nuevo
+ de CapCut (caso real: mariaaa baic)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Causa raiz, encontrada diagnosticando el draft real con datos generados
+por CapCut 8.8+:
+
+1. analyze() trataba CUALQUIER track con name="" como texto MANUAL del
+   usuario, sin mirar el contenido real. El track de auto-caption recien
+   generado por CapCut en esta version tiene name vacio (confirmado:
+   'mariaaa baic' tiene track type=text name='' con 43 segmentos), asi
+   que se descartaba de entrada con auto_ya_estilado.append([]) antes de
+   intentar clasificarlo.
+
+2. _clasificar_material_texto() buscaba 'words' DENTRO de content (json
+   string) -- formato viejo. El formato nuevo de CapCut tiene 'words' como
+   campo SEPARADO a nivel raiz del material, en arrays paralelos
+   {start_time, end_time, text} que ademas incluyen " " (espacio) como
+   separador entre palabras. Con el codigo viejo, content.get('words', [])
+   siempre daba [] para este formato -> 0 oraciones extraidas.
+
+3. Esos timings del formato nuevo estan en MILISEGUNDOS, no microsegundos
+   (confirmado con datos reales: 'María' = start_time:560, end_time:880).
+   Sin convertir, los timings quedarian 1000x mas cortos que el real.
+
+Fix:
+- es_track_con_nombre_manual ya no asume manual solo por name=='' ; deja
+  que _clasificar_material_texto decida por el contenido real (usa
+  recognize_task_id poblado como marca de auto-caption real, mismo
+  criterio que ya usa Cleaner.limpiar_autocaption_nativo()).
+- _clasificar_material_texto soporta AMBOS formatos (words en content
+  para el viejo, words a nivel raiz para el nuevo), descartando
+  separadores de solo espacio en el nuevo.
+- Se agrego utils.helpers.detectar_multiplicador_tiempo (compartida con
+  utils.extract_autocaption, que ya tenia esta heuristica, para no
+  duplicarla -- evita import circular entre draft_manager y
+  extract_autocaption). DraftManager.analyze() calcula el multiplicador
+  UNA vez para todo el draft y lo aplica solo al formato nuevo; el
+  formato viejo (ya en start_us/end_us) no se reconvierte.
+- diagnostico_maria.py: script de SOLO LECTURA (no llama save() ni
+  modifica nada) que se uso para encontrar este bug con el draft real;
+  se deja en el repo como herramienta reusable para diagnosticar futuros
+  drafts.
+
+5 tests nuevos en tests/test_draft_manager.py que reproducen el caso real
+exacto de 'mariaaa baic' (incluye el dato real: vos/sos/María en ms).
+35/35 tests en total.
+---
+ core/draft_manager.py        | 165 +++++++++++++++++++++++++++++------
+ diagnostico_maria.py         | 131 +++++++++++++++++++++++++++
+ tests/test_draft_manager.py  | 103 ++++++++++++++++++++++
+ utils/extract_autocaption.py |  19 +---
+ utils/helpers.py             |  28 ++++++
+ 5 files changed, 402 insertions(+), 44 deletions(-)
+ create mode 100644 diagnostico_maria.py
+
+diff --git a/core/draft_manager.py b/core/draft_manager.py
+index f73a95f..513d891 100644
+--- a/core/draft_manager.py
++++ b/core/draft_manager.py
+@@ -7,6 +7,7 @@ from datetime import datetime
+ from config import PATHS, AUTO_CAPTION_NAMES
+ from core.logger import logger
+ from core.exceptions import InvalidDraftError, BackupError
++from utils.helpers import detectar_multiplicador_tiempo
+ 
+ class DraftManager:
+     PREFIJO_RESIDUAL = "AUTO_"
+@@ -62,37 +63,121 @@ class DraftManager:
+         try: return json.loads(content_str)
+         except json.JSONDecodeError: return None
+ 
+-    def _clasificar_material_texto(self, text_mat):
++    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1):
++        """Clasifica un material de texto en auto_sin_editar / auto_ya_estilado
++        / texto_manual.
++
++        Soporta DOS formatos de CapCut observados con datos reales:
++        - Formato viejo: 'words' vive DENTRO de content (JSON string), como
++          una lista de dicts {"text":..., "start_time"/"start_us":...} YA EN
++          MICROSEGUNDOS (no necesita conversion).
++        - Formato nuevo (CapCut 8.8+, confirmado con datos reales de
++          "mariaaa baic"): 'words' es un campo SEPARADO a nivel RAIZ del
++          material, como arrays paralelos {"start_time":[...], "end_time":
++          [...], "text":[...]} en MILISEGUNDOS (no microsegundos), e incluye
++          elementos de solo espacio (" ") como separadores entre palabras
++          que hay que descartar. mult_tiempo_raiz convierte esos valores
++          crudos a microsegundos (ver analyze(), que lo calcula UNA vez para
++          todo el draft con utils.helpers.detectar_multiplicador_tiempo).
++        """
+         try:
+             content = self._parse_content(text_mat.get("content"))
+-            if content is None: return "texto_manual", None
+-            
+-            words = content.get("words", [])
+-            if not words: return "texto_manual", None
+-            
+-            texto_de_words = "".join(w.get("text", "") for w in words)
+-            texts_list = content.get("texts") or []
+-            texto_visible = "".join(texts_list) if isinstance(texts_list, list) else ""
+-            
++
+             palabras_con_timing = []
+-            for w in words:
+-                palabra = w.get("text", "").strip()
+-                if not palabra: continue
+-                
+-                start = w.get("start_time")
+-                if start is None: start = w.get("start_us", 0)
+-                end = w.get("end_time")
+-                if end is None: end = w.get("end_us", 0)
+-                
+-                palabras_con_timing.append({"word": palabra, "start_us": int(start), "end_us": int(end)})
+-            
+-            if texto_de_words.strip() == texto_visible.strip():
+-                return "auto_sin_editar", palabras_con_timing
+-            else:
+-                return "auto_ya_estilado", palabras_con_timing
++
++            # ── Formato nuevo: words a nivel raiz, arrays paralelos ────────
++            words_raiz = text_mat.get("words")
++            if isinstance(words_raiz, dict) and words_raiz.get("text"):
++                starts = words_raiz.get("start_time", []) or []
++                ends = words_raiz.get("end_time", []) or []
++                for i, palabra_raw in enumerate(words_raiz.get("text", [])):
++                    palabra = (palabra_raw or "").strip()
++                    if not palabra:
++                        continue
++                    start_raw = starts[i] if i < len(starts) else 0
++                    end_raw = ends[i] if i < len(ends) else 0
++                    palabras_con_timing.append({
++                        "word": palabra,
++                        "start_us": int(start_raw) * mult_tiempo_raiz,
++                        "end_us": int(end_raw) * mult_tiempo_raiz,
++                    })
++                if palabras_con_timing:
++                    # recognize_task_id poblado = viene de reconocimiento de
++                    # voz automatico real (no texto tipeado a mano). Mismo
++                    # criterio que ya usa Cleaner.limpiar_autocaption_nativo().
++                    if text_mat.get("recognize_task_id"):
++                        return "auto_sin_editar", palabras_con_timing
++                    return "auto_ya_estilado", palabras_con_timing
++
++            # ── Formato viejo: words dentro de content, lista de dicts,
++            #    YA en microsegundos (start_us/end_us), sin multiplicador ──
++            if content is not None:
++                words = content.get("words", [])
++                if words:
++                    texto_de_words = "".join(w.get("text", "") for w in words)
++                    texts_list = content.get("texts") or []
++                    texto_visible = "".join(texts_list) if isinstance(texts_list, list) else ""
++
++                    for w in words:
++                        palabra = w.get("text", "").strip()
++                        if not palabra:
++                            continue
++
++                        start = w.get("start_time")
++                        if start is None: start = w.get("start_us", 0)
++                        end = w.get("end_time")
++                        if end is None: end = w.get("end_us", 0)
++
++                        palabras_con_timing.append({"word": palabra, "start_us": int(start), "end_us": int(end)})
++
++                    if texto_de_words.strip() == texto_visible.strip():
++                        return "auto_sin_editar", palabras_con_timing
++                    else:
++                        return "auto_ya_estilado", palabras_con_timing
++
++            return "texto_manual", None
+         except Exception:
+             return "texto_manual", None
+ 
++    def _calcular_multiplicador_raiz(self, texts_list, duration_us: int) -> int:
++        """Calcula, para TODO el draft, el multiplicador que convierte los
++        timings crudos de 'words' a nivel raiz (formato nuevo de CapCut) a
++        microsegundos. Usa la misma heuristica que utils.helpers.
++        detectar_multiplicador_tiempo (mediana de duracion de palabra
++        ~0.3s), mirando todos los materiales de una sola vez en vez de
++        adivinar por separado en cada uno (mas estable con pocas palabras).
++        """
++        max_raw = 0
++        duraciones = []
++        for mat in (texts_list or []):
++            wd = mat.get("words")
++            if not isinstance(wd, dict):
++                continue
++            starts = wd.get("start_time", []) or []
++            ends = wd.get("end_time", []) or []
++            for v in ends or starts:
++                try:
++                    max_raw = max(max_raw, int(v))
++                except (TypeError, ValueError):
++                    pass
++            for a, b in zip(starts, ends):
++                try:
++                    d = int(b) - int(a)
++                    if d > 0:
++                        duraciones.append(d)
++                except (TypeError, ValueError):
++                    pass
++
++        if not duraciones and max_raw == 0:
++            return 1  # sin datos del formato nuevo en este draft
++
++        median_dur = 0
++        if duraciones:
++            duraciones.sort()
++            median_dur = duraciones[len(duraciones) // 2]
++
++        return detectar_multiplicador_tiempo(median_dur, max_raw, duration_us)
++
+     def analyze(self):
+         if not self.data: self.load()
+ 
+@@ -110,6 +195,13 @@ class DraftManager:
+         total_segmentos_texto = 0
+         total_segmentos_audio = 0
+ 
++        # Calcular UNA vez para todo el draft el multiplicador que convierte
++        # los timings crudos del formato nuevo (words a nivel raiz) a
++        # microsegundos. Mismo criterio que utils.extract_autocaption usa
++        # para el camino de respaldo (duracion tipica de palabra ~0.3s).
++        duration_us = int(self.data.get("duration", 0) or 0)
++        mult_tiempo_raiz = self._calcular_multiplicador_raiz(texts_list, duration_us)
++
+         tracks_list = self.data.get("tracks") or []
+         for track in tracks_list:
+             track_name = track.get("name", "") or ""
+@@ -124,7 +216,21 @@ class DraftManager:
+             elif track_type == "audio": total_segmentos_audio += len(segmentos)
+             
+             es_track_autocaption = track_name in AUTO_CAPTION_NAMES
+-            es_track_manual = (not es_track_autocaption) and (not track_name.startswith(self.PREFIJO_RESIDUAL))
++            # OJO: antes, cualquier track con name="" (formato nuevo de
++            # CapCut 8.8+, confirmado con datos reales: el track de
++            # auto-caption recien generado tiene name vacio) se trataba como
++            # "manual" SOLO por el nombre, sin mirar el contenido real -> se
++            # descartaba de entrada con auto_ya_estilado.append([]) antes de
++            # llegar a _clasificar_material_texto. Ahora un track sin nombre
++            # NO se asume manual; se deja que _clasificar_material_texto
++            # decida por el contenido real de cada material (usa
++            # recognize_task_id, que es la marca real de reconocimiento de
++            # voz automatico, igual que Cleaner.limpiar_autocaption_nativo()).
++            es_track_con_nombre_manual = (
++                bool(track_name)
++                and not es_track_autocaption
++                and not track_name.startswith(self.PREFIJO_RESIDUAL)
++            )
+             
+             if track_type == "text":
+                 for seg in segmentos:
+@@ -136,11 +242,11 @@ class DraftManager:
+                     
+                     materiales_ya_contados.add(mat_id)
+                     
+-                    if es_track_manual:
++                    if es_track_con_nombre_manual:
+                         auto_ya_estilado.append([])
+                         continue
+                     
+-                    categoria, palabras = self._clasificar_material_texto(text_mat)
++                    categoria, palabras = self._clasificar_material_texto(text_mat, mult_tiempo_raiz)
+                     if categoria == "auto_sin_editar" and palabras:
+                         auto_sin_editar.append(palabras)
+                     elif categoria == "auto_ya_estilado":
+@@ -154,7 +260,8 @@ class DraftManager:
+                         else:
+                             texto_manual.append(text_mat.get("content", "")[:50] + "...")
+ 
+-        duration_us = self.data.get("duration", 0) or 0
++        # duration_us ya se calculo arriba (linea 163) para detectar el
++        # multiplicador de tiempo del formato nuevo.
+         return {
+             "oraciones_auto_sin_editar": auto_sin_editar,
+             "cantidad_oraciones_procesables": len(auto_sin_editar),
+diff --git a/diagnostico_maria.py b/diagnostico_maria.py
+new file mode 100644
+index 0000000..511aacb
+--- /dev/null
++++ b/diagnostico_maria.py
+@@ -0,0 +1,131 @@
++"""
++DIAGNOSTICO de solo lectura para "mariaaa baic".
++
++NO modifica nada (no llama a script.save(), no borra tracks). Solo lee
++draft_content.json y muestra qué encuentra, para entender por qué
++generar_subtitulos_maria.py extrajo 0 oraciones.
++
++Uso:
++    python diagnostico_maria.py
++"""
++
++import json
++from pathlib import Path
++
++CARPETA_DRAFTS = r"C:\Users\user2\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
++NOMBRE_DRAFT = "mariaaa baic"
++
++
++def main():
++    json_path = Path(CARPETA_DRAFTS) / NOMBRE_DRAFT / "draft_content.json"
++    if not json_path.is_file():
++        print(f"ERROR: no se encontro el draft en:\n  {json_path}")
++        return
++
++    with open(json_path, "r", encoding="utf-8") as f:
++        draft = json.load(f)
++
++    duracion_us = draft.get("duration", 0)
++    print(f"Duracion del video: {duracion_us/1_000_000:.1f}s")
++
++    materials_texts = draft.get("materials", {}).get("texts", []) or []
++    print(f"\nTotal de materiales de texto en el draft: {len(materials_texts)}")
++
++    con_words = 0
++    con_content_json = 0
++    ejemplos = []
++
++    for mat in materials_texts:
++        mid = mat.get("id", "")[:8]
++        content_raw = mat.get("content")
++
++        # Caso A: content es un JSON string con "words" adentro (formato
++        # que lee DraftManager/camino 1)
++        parsed = None
++        if isinstance(content_raw, str):
++            try:
++                parsed = json.loads(content_raw)
++            except Exception:
++                parsed = None
++
++        if parsed and isinstance(parsed, dict) and parsed.get("words"):
++            con_content_json += 1
++            if len(ejemplos) < 5:
++                texto = "".join(w.get("text", "") for w in parsed["words"][:6])
++                ejemplos.append(f"  [content/words] id={mid}... texto~'{texto}...'")
++
++        # Caso B: el material tiene "words" como array paralelo directo
++        # (formato que lee el camino 2, respaldo)
++        if mat.get("words"):
++            con_words += 1
++            if len(ejemplos) < 10:
++                w = mat["words"]
++                if isinstance(w, list) and w and isinstance(w[0], dict):
++                    texto = "".join(x.get("text", "") for x in w[:6])
++                else:
++                    texto = str(w)[:60]
++                ejemplos.append(f"  [material.words] id={mid}... texto~'{texto}...'")
++
++    print(f"Materiales con 'words' dentro de content (JSON string): {con_content_json}")
++    print(f"Materiales con 'words' como array directo en el material: {con_words}")
++
++    # Volcado CRUDO del primer material completo (todas sus claves), para
++    # ver si el texto/tiempos reales viven en otro campo que no estamos
++    # mirando todavia (p.ej. "content" como dict en vez de words, o un
++    # campo "text" separado a nivel raiz del material).
++    if materials_texts:
++        print("\nMaterial #0 COMPLETO (todas sus claves, valores recortados):")
++        primero = materials_texts[0]
++        for k, v in primero.items():
++            v_str = json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
++            if len(v_str) > 200:
++                v_str = v_str[:200] + "...(recortado)"
++            print(f"  {k}: {v_str}")
++
++    print("\nEjemplos encontrados (hasta 10):")
++    if ejemplos:
++        for e in ejemplos:
++            print(e)
++    else:
++        print("  (ninguno)")
++
++    # Tracks: mostrar TODOS los tipos tal como vienen en el archivo, sin
++    # asumir que el valor es literalmente "text" (si el draft usa otra
++    # capitalizacion, un numero, etc, un filtro exacto los esconde y
++    # parece que "no hay tracks" cuando si los hay).
++    print("\nTODOS los tracks del draft (sin filtrar por tipo):")
++    tracks = draft.get("tracks", []) or []
++    if not tracks:
++        print("  (el array 'tracks' esta vacio o no existe)")
++    for i, track in enumerate(tracks):
++        tipo = track.get("type")
++        nombre = track.get("name", "(sin nombre)")
++        segs = track.get("segments", []) or []
++        print(f"  [{i}] type={tipo!r} name={nombre!r} segmentos={len(segs)}")
++
++    # Cuantos segmentos (de CUALQUIER track) referencian alguno de los 217
++    # material_id de texto que ya encontramos arriba
++    ids_texto = {m.get("id") for m in materials_texts}
++    refs_a_texto = 0
++    for track in tracks:
++        for seg in track.get("segments", []) or []:
++            if seg.get("material_id") in ids_texto:
++                refs_a_texto += 1
++    print(f"\nSegmentos (en cualquier track) que referencian esos 217 material_id de texto: {refs_a_texto}")
++
++    print("\n" + "=" * 60)
++    if con_content_json == 0 and con_words == 0:
++        print("DIAGNOSTICO: no se encontro NINGUN material con 'words'.")
++        print("Esto pasa cuando el auto-caption original ya no esta en el")
++        print("draft (se perdio o se reemplazo en una corrida anterior),")
++        print("igual que el Error #2 documentado en el handoff original.")
++    else:
++        print("DIAGNOSTICO: SI hay datos de auto-caption en el archivo.")
++        print("Si el generador igual dio 0, el problema esta en el PARSEO")
++        print("(formato de 'words' distinto al esperado), no en que falten")
++        print("los datos. Compartir este output para ajustar el parser.")
++    print("=" * 60)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_draft_manager.py b/tests/test_draft_manager.py
+index 742c4f4..a101fa0 100644
+--- a/tests/test_draft_manager.py
++++ b/tests/test_draft_manager.py
+@@ -71,3 +71,106 @@ class TestDraftManagerAnalyze:
+         result = dm.analyze()
+         assert result["cantidad_oraciones_procesables"] == 0
+         assert result["duracion_video_seg"] == pytest.approx(10.0)
++
++
++class TestDraftManagerFormatoNuevoMaria:
++    """Regresión para el caso real de 'mariaaa baic' (CapCut 8.8+):
++
++    1. El track de auto-caption recién generado tiene name="" -> antes se
++       trataba como texto MANUAL del usuario solo por el nombre vacío, sin
++       mirar el contenido real, y se descartaba sin extraer nada.
++    2. 'words' vive a nivel RAIZ del material (no dentro de content), como
++       arrays paralelos con " " (espacio) como separador de palabras.
++    3. Esos timings están en MILISEGUNDOS, no microsegundos -> sin
++       convertir, los subtítulos generados durarían 1000x menos de lo real.
++    """
++
++    def _draft_formato_nuevo(self, tmp_path, con_recognize_task_id=True):
++        material = {
++            "id": "MAT1",
++            "type": "subtitle",
++            "content": json.dumps({"styles": [{"size": 30}]}),  # sin "words" adentro
++            "words": {
++                "start_time": [0, 240, 240, 440, 560],
++                "end_time": [240, 240, 440, 440, 880],
++                "text": ["vos", " ", "sos", " ", "María"],
++            },
++        }
++        if con_recognize_task_id:
++            material["recognize_task_id"] = "6a38c77c39734201f0f5f244_8_0"
++
++        data = {
++            "duration": 83_500_000,  # microsegundos reales (83.5s)
++            "materials": {"texts": [material]},
++            "tracks": [
++                {"type": "video", "name": "", "segments": []},
++                # name vacio: el caso real que se descartaba como "manual"
++                {"type": "text", "name": "", "segments": [{"material_id": "MAT1"}]},
++            ],
++        }
++        draft_file = tmp_path / "draft_content.json"
++        draft_file.write_text(json.dumps(data), encoding="utf-8")
++        return str(draft_file)
++
++    def test_track_sin_nombre_no_se_descarta_como_manual(self, tmp_path):
++        path = self._draft_formato_nuevo(tmp_path)
++        oraciones, stats = DraftManager.oraciones_desde_json(path)
++
++        assert stats["oraciones"] == 1, "El track con name='' se siguio tratando como manual"
++        assert stats["palabras"] == 3
++
++    def test_espacios_se_descartan_como_separador(self, tmp_path):
++        path = self._draft_formato_nuevo(tmp_path)
++        oraciones, _ = DraftManager.oraciones_desde_json(path)
++
++        palabras = [p["word"] for p in oraciones[0]]
++        assert palabras == ["vos", "sos", "María"]
++        assert " " not in palabras
++
++    def test_timings_se_convierten_de_milisegundos_a_microsegundos(self, tmp_path):
++        path = self._draft_formato_nuevo(tmp_path)
++        oraciones, _ = DraftManager.oraciones_desde_json(path)
++
++        maria = oraciones[0][-1]
++        assert maria["word"] == "María"
++        # En el material real: start_time=560, end_time=880 (MILISEGUNDOS).
++        # Sin la conversion, esto quedaria en 560/880 (microsegundos
++        # absurdamente cortos, <1ms). Con la conversion correcta: 560000us
++        # / 880000us (0.56s / 0.88s).
++        assert maria["start_us"] == 560_000
++        assert maria["end_us"] == 880_000
++
++    def test_sin_recognize_task_id_es_auto_ya_estilado_no_procesable(self, tmp_path):
++        """Si el material NO tiene recognize_task_id, no es auto-caption
++        nativo (podria ser texto ya editado a mano) -> no debe contarse
++        como 'procesable' (oraciones_auto_sin_editar)."""
++        path = self._draft_formato_nuevo(tmp_path, con_recognize_task_id=False)
++        oraciones, stats = DraftManager.oraciones_desde_json(path)
++
++        assert stats["oraciones"] == 0
++
++    def test_formato_viejo_microsegundos_no_se_reconvierte(self, tmp_path):
++        """El formato viejo (words dentro de content, ya en start_us/end_us)
++        no debe pasar por el multiplicador del formato nuevo (que asumiria
++        milisegundos y arruinaria timings ya correctos)."""
++        content_dict = {
++            "words": [
++                {"text": "hola", "start_us": 0, "end_us": 200_000},
++                {"text": "mundo", "start_us": 200_000, "end_us": 500_000},
++            ],
++            "texts": ["hola", "mundo"],
++        }
++        data = {
++            "duration": 1_000_000,
++            "materials": {"texts": [{"id": "MATV", "content": json.dumps(content_dict)}]},
++            "tracks": [
++                {"type": "text", "name": "Reconocimiento de voz",
++                 "segments": [{"material_id": "MATV"}]},
++            ],
++        }
++        draft_file = tmp_path / "draft_content.json"
++        draft_file.write_text(json.dumps(data), encoding="utf-8")
++
++        oraciones, _ = DraftManager.oraciones_desde_json(str(draft_file))
++        assert oraciones[0][0]["end_us"] == 200_000
++        assert oraciones[0][1]["end_us"] == 500_000
+diff --git a/utils/extract_autocaption.py b/utils/extract_autocaption.py
+index 1a37a72..66022b7 100644
+--- a/utils/extract_autocaption.py
++++ b/utils/extract_autocaption.py
+@@ -21,6 +21,7 @@ from pathlib import Path
+ from typing import List, Dict, Tuple
+ 
+ from core.draft_manager import DraftManager
++from utils.helpers import detectar_multiplicador_tiempo
+ 
+ 
+ class AutocaptionExtractor:
+@@ -93,22 +94,10 @@ class AutocaptionExtractor:
+     def _detectar_multiplicador(median_dur_raw: int, max_raw: int, duration_us: int) -> int:
+         """Factor para llevar timings crudos a microsegundos.
+ 
+-        Desambigua us/ms/s usando la duracion TIPICA de una palabra hablada
+-        (~0.3s). Una palabra cruda de 400 unidades son 0.0004s si fueran us
+-        (absurdo) o 0.4s si fueran ms (real) -> elige ms.
++        Delega en utils.helpers.detectar_multiplicador_tiempo (compartida
++        con DraftManager para no duplicar la heuristica us/ms/s).
+         """
+-        candidatos = (1, 1000, 1_000_000)
+-        TARGET_US = 300_000  # duracion plausible de una palabra (~0.3s)
+-        if median_dur_raw and median_dur_raw > 0:
+-            return min(candidatos, key=lambda m: abs(median_dur_raw * m - TARGET_US))
+-        # respaldo: por magnitud del maximo vs duracion del video
+-        if duration_us and duration_us > 0 and max_raw > 0:
+-            for mult in candidatos:
+-                if max_raw * mult <= duration_us * 1.5:
+-                    return mult
+-        if max_raw > 10_000_000:
+-            return 1
+-        return 1000
++        return detectar_multiplicador_tiempo(median_dur_raw, max_raw, duration_us)
+ 
+     @staticmethod
+     def _extraer_por_arrays(materials_texts, draft, stats) -> List[List[Dict]]:
+diff --git a/utils/helpers.py b/utils/helpers.py
+index 17e4efc..4319ee7 100644
+--- a/utils/helpers.py
++++ b/utils/helpers.py
+@@ -34,3 +34,31 @@ def generate_unique_id(existing_ids: set[str]) -> str:
+     while new_id in existing_ids:
+         new_id = str(uuid.uuid4())
+     return new_id
++
++
++def detectar_multiplicador_tiempo(median_dur_raw: int, max_raw: int, duration_us: int) -> int:
++    """Factor para llevar timings crudos de palabras al estandar de
++    microsegundos del proyecto.
++
++    Vive en helpers.py (modulo neutral, sin dependencias de core/) porque
++    tanto core/draft_manager.py como utils/extract_autocaption.py la
++    necesitan, y draft_manager <-> extract_autocaption tienen un import
++    circular si una depende de la otra.
++
++    Desambigua us/ms/s usando la duracion TIPICA de una palabra hablada
++    (~0.3s). Una palabra cruda de 400 unidades son 0.0004s si fueran us
++    (absurdo) o 0.4s si fueran ms (real, confirmado con datos reales de
++    CapCut 8.8+: "vos"=[0,240] son 0 y 240 MILISEGUNDOS) -> elige ms.
++    """
++    candidatos = (1, 1000, 1_000_000)
++    TARGET_US = 300_000  # duracion plausible de una palabra (~0.3s)
++    if median_dur_raw and median_dur_raw > 0:
++        return min(candidatos, key=lambda m: abs(median_dur_raw * m - TARGET_US))
++    # respaldo: por magnitud del maximo vs duracion del video
++    if duration_us and duration_us > 0 and max_raw > 0:
++        for mult in candidatos:
++            if max_raw * mult <= duration_us * 1.5:
++                return mult
++    if max_raw > 10_000_000:
++        return 1
++    return 1000
+-- 
+2.43.0
+

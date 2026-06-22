@@ -96,3 +96,61 @@ class TestBloqueDensoNoAplastaTodoEnLaMismaY(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNoHayDosPalabrasSimultaneasEnLaMismaPosicion(unittest.TestCase):
+    """Regresión del caso real de 'mariaaa baic': 'vos sos María' (oración 1)
+    y 'la dueña de todo esto' (oración 2) se solapan en el tiempo.
+
+    NOTA sobre la causa real: al inspeccionar el draft real, las palabras
+    simultáneas NO estaban en posición idéntica: estaban a 0.05 en Y dentro
+    de la misma columna (el espaciado normal de línea del estilo karaoke).
+    El amontonamiento visible lo causaba el TEXTO 3x mas grande de lo
+    calibrado (style.size=30 en vez de 10), no las posiciones. Con
+    style.size=10 ese espaciado de 0.05 es correcto y legible.
+
+    Este test verifica el invariante que SI debe cumplirse siempre: dos
+    palabras visibles a la vez nunca deben caer en EL MISMO punto (mismo X
+    y mismo Y), que era el sintoma del bug de colision real."""
+
+    def setUp(self):
+        self.engine = _engine()
+        self.engine.max_palabras_por_bloque = 5
+        self.engine.ancla_izquierda = -0.20
+        self.engine.ancla_derecha = 0.20
+        self.engine.ancho_por_caracter = 0.15
+
+    def test_oraciones_solapadas_no_comparten_posicion(self):
+        oracion1 = [
+            {"word": "vos", "start_us": 400000, "end_us": 670000},
+            {"word": "sos", "start_us": 670000, "end_us": 970000},
+            {"word": "María", "start_us": 970000, "end_us": 1300000},
+        ]
+        oracion2 = [
+            {"word": "la", "start_us": 1170000, "end_us": 1430000},
+            {"word": "dueña", "start_us": 1430000, "end_us": 1730000},
+            {"word": "de", "start_us": 1730000, "end_us": 1830000},
+            {"word": "todo", "start_us": 1830000, "end_us": 1930000},
+            {"word": "esto", "start_us": 1930000, "end_us": 2130000},
+        ]
+        bloques = [
+            {"idx_oracion": 0, "palabras": oracion1, "es_overlap": False},
+            {"idx_oracion": 1, "palabras": oracion2, "es_overlap": False},
+        ]
+        posiciones = self.engine._calcular_posiciones(bloques, [])
+
+        # Ninguna palabra de la oración 2 (visible junto con la 1) debe caer
+        # en EL MISMO punto que una palabra de la oración 1. Umbral 0.03:
+        # por debajo del espaciado normal de linea (0.05) y del min_dist_y
+        # (0.04), asi que solo detecta superposicion real (mismo punto), no
+        # el apilado normal del estilo karaoke.
+        pos_o1 = [posiciones[f"0_0_{i}"] for i in range(3)]
+        for j in range(5):
+            x2, y2 = posiciones[f"1_1_{j}"]
+            for (x1, y1) in pos_o1:
+                mismo_punto = abs(x1 - x2) < 0.03 and abs(y1 - y2) < 0.03
+                self.assertFalse(
+                    mismo_punto,
+                    f"Palabra de oración 2 en ({x2:.2f},{y2:.2f}) cae en el "
+                    f"mismo punto que una de oración 1 en ({x1:.2f},{y1:.2f})",
+                )

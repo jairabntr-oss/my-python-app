@@ -74,10 +74,14 @@ def cargar_perfil_estilo() -> dict:
 
     return {
         "text_size": tf.get("size", 30),
+        # style_size: escala INTERNA de content.styles (distinta de text_size
+        # raiz). Validado en 10 para "entrv fede baic". Ver handoff Error #4.
+        "style_size": tf.get("style_size", 10),
         "text_color": tf.get("color", "#FFFFFF"),
         "bold": tf.get("bold", True),
         "font_path": tf.get("font_path"),
         "font_name": tf.get("font"),
+        "font_id": tf.get("font_id", ""),
         "scale_x": vs.get("scale", 3.037),
         "scale_y": vs.get("scale", 3.037),
         "shadow_enabled": sh.get("enabled", True),
