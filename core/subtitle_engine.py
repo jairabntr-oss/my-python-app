@@ -40,6 +40,10 @@ class SubtitleEngine:
     PASO_Y_CORTO = 0.05   # Palabras 1-3 letras
     PASO_Y_LARGO = 0.10   # Palabras 8+ letras
 
+    # Prefijo de los tracks de subtitulos (se crean varios para no solapar
+    # en el tiempo: equivalente a los AUTO_pos_N del sistema original)
+    TRACK_PREFIX = "AUTO_sub_"
+
     def __init__(self, script, profile: dict):
         """Inicializa el motor con un script ya cargado.
 
@@ -104,9 +108,8 @@ class SubtitleEngine:
         # 3. Calcular posiciones
         posiciones = self._calcular_posiciones(bloques, pares_overlap)
 
-        # 4. Crear track y segmentos
-        self._asegurar_track("AUTO_subtitulos")
-        total_palabras = self._crear_segmentos(bloques, posiciones)
+        # 4. Crear segmentos repartidos en varios tracks (anti SegmentOverlap)
+        total_palabras, total_tracks = self._crear_segmentos(bloques, posiciones)
 
         # 5. Guardar
         self.script.save()
@@ -116,7 +119,8 @@ class SubtitleEngine:
             "total_palabras": total_palabras,
             "total_bloques": len(bloques),
             "pares_overlap": len(pares_overlap),
-            "track_name": "AUTO_subtitulos",
+            "total_tracks": total_tracks,
+            "track_name": self.TRACK_PREFIX + "*",
         }
 
     # ── Lógica de overlap ──────────────────────────────────────────────────────
@@ -218,7 +222,7 @@ class SubtitleEngine:
         """
         posiciones = {}  # palabra_id → (x, y)
 
-        for bloque in bloques:
+        for b_idx, bloque in enumerate(bloques):
             es_overlap_segundo = any(
                 bloque["idx_oracion"] == par[1] for par in pares_overlap
             )
@@ -264,9 +268,11 @@ class SubtitleEngine:
                     y_actual -= 0.05
                     intento += 1
 
-                palabra_id = f"{bloque['idx_oracion']}_{i}"
-                posiciones[palabra_id] = (x, y_actual)
-                cajas_ocupadas.append((x, y_actual, ancho_palabra))
+                palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
+                # clamp final: nunca fuera de la zona visible de pantalla
+                y_guardado = max(y_zona_min, min(y_zona_max, y_actual))
+                posiciones[palabra_id] = (x, y_guardado)
+                cajas_ocupadas.append((x, y_guardado, ancho_palabra))
 
                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
                 y_actual += paso
@@ -287,61 +293,79 @@ class SubtitleEngine:
             return
         self.script.add_track(cc.TrackType.text, track_name)
 
-    def _crear_segmentos(self, bloques: List[dict], posiciones: dict) -> int:
-        """Crea TextSegment en CapCut para cada palabra.
+    def _crear_segmentos(self, bloques: List[dict], posiciones: dict):
+        """Crea un TextSegment por palabra y los reparte en varios tracks.
 
-        Usa la API correcta de pycapcut:
-        - TextSegment(text, timerange, style=TextStyle(...), clip_settings=ClipSettings(...))
-        - ClipSettings para escala y posición
-        - TextStyle para tamaño, color, alineación
+        Por que multiples tracks: pycapcut prohibe dos segmentos solapados en
+        el TIEMPO dentro de un mismo track (SegmentOverlap). Con el efecto
+        acumulativo (cada palabra se queda hasta el fin de su bloque) las
+        palabras de un bloque se solapan en el tiempo -> deben ir en tracks
+        distintos. Ademas, el dialogo simultaneo solapa oraciones enteras.
+        Reparto greedy: cada palabra al primer track que ya este libre.
+        Esto replica los AUTO_pos_N del sistema original.
         """
-        track_name = "AUTO_subtitulos"
-        total_palabras = 0
-
         scale = self.profile.get("scale_x", 3.037)
+        scale_y = self.profile.get("scale_y", scale)
         text_size = self.profile.get("text_size", 30)
         color_hex = self.profile.get("text_color", "#FFFFFF")
         color_rgb = self._hex_to_rgb(color_hex)
+        bold = self.profile.get("bold", True)
 
-        estilo = cc.TextStyle(
-            size=text_size,
-            align=1,           # 1 = centrado
-            color=color_rgb,
-            bold=self.profile.get("bold", True),
-        )
+        estilo = cc.TextStyle(size=text_size, align=1, color=color_rgb, bold=bold)
 
-        for bloque in bloques:
-            for i, palabra_data in enumerate(bloque["palabras"]):
-                palabra_id = f"{bloque['idx_oracion']}_{i}"
+        # 1) construir todos los segmentos con timing ACUMULATIVO
+        items = []  # (start_us, end_us, palabra, x, y)
+        for b_idx, bloque in enumerate(bloques):
+            palabras = bloque["palabras"]
+            if not palabras:
+                continue
+            # el bloque entero permanece hasta que termina su ultima palabra
+            block_end = int(palabras[-1]["end_us"])
+            for i, palabra_data in enumerate(palabras):
+                start_us = int(palabra_data["start_us"])
+                end_us = max(block_end, start_us + 1_000)  # acumulativo
+                palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
                 x, y = posiciones.get(palabra_id, (0.0, 0.0))
+                items.append((start_us, end_us, palabra_data["word"], x, y))
 
-                start_us = palabra_data["start_us"]
-                end_us = palabra_data["end_us"]
+        # 2) reparto greedy en tracks (cada item al primer track libre)
+        items.sort(key=lambda t: t[0])
+        track_fin = []      # fin del ultimo segmento por track
+        asignacion = []     # indice de track por item
+        for (start_us, end_us, *_r) in items:
+            destino = None
+            for ti, fin in enumerate(track_fin):
+                if fin <= start_us:
+                    destino = ti
+                    break
+            if destino is None:
+                destino = len(track_fin)
+                track_fin.append(0)
+            track_fin[destino] = end_us
+            asignacion.append(destino)
 
-                # EFECTO ACUMULATIVO: extender hasta próxima palabra
-                if i < len(bloque["palabras"]) - 1:
-                    end_us = bloque["palabras"][i + 1]["start_us"]
+        total_tracks = len(track_fin)
 
-                duracion = max(end_us - start_us, 1_000)  # mínimo 1ms
+        # 3) crear los tracks necesarios
+        for ti in range(total_tracks):
+            self.script.add_track(cc.TrackType.text, f"{self.TRACK_PREFIX}{ti}")
 
-                clip = cc.ClipSettings(
-                    scale_x=scale,
-                    scale_y=scale,
-                    transform_x=x,
-                    transform_y=y,
-                )
+        # 4) crear y agregar los segmentos
+        total_palabras = 0
+        for (start_us, end_us, palabra, x, y), ti in zip(items, asignacion):
+            clip = cc.ClipSettings(
+                scale_x=scale, scale_y=scale_y, transform_x=x, transform_y=y,
+            )
+            segmento = cc.TextSegment(
+                text=palabra,
+                timerange=cc.Timerange(start_us, end_us - start_us),
+                style=estilo,
+                clip_settings=clip,
+            )
+            self.script.add_segment(segmento, f"{self.TRACK_PREFIX}{ti}")
+            total_palabras += 1
 
-                segmento = cc.TextSegment(
-                    text=palabra_data["word"],
-                    timerange=cc.Timerange(start_us, duracion),
-                    style=estilo,
-                    clip_settings=clip,
-                )
-
-                self.script.add_segment(segmento, track_name)
-                total_palabras += 1
-
-        return total_palabras
+        return total_palabras, total_tracks
 
     def _se_solapa(self, intervals: List[Tuple[int, int]], new_start: int, new_end: int) -> bool:
         """Devuelve True si el intervalo nuevo se solapa con alguno existente."""

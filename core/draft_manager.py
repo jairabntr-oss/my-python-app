@@ -169,6 +169,23 @@ class DraftManager:
             "total_segmentos_audio": total_segmentos_audio,
         }
 
+    @classmethod
+    def oraciones_desde_json(cls, json_path):
+        """Atajo: devuelve solo las oraciones de auto-caption SIN editar.
+
+        Returns:
+            (oraciones, stats) con oraciones = List[List[{word,start_us,end_us}]]
+        """
+        mgr = cls(json_path)
+        result = mgr.analyze()
+        oraciones = result["oraciones_auto_sin_editar"]
+        stats = {
+            "oraciones": result["cantidad_oraciones_procesables"],
+            "palabras": result["cantidad_palabras_procesables"],
+            "duracion_seg": result["duracion_video_seg"],
+        }
+        return oraciones, stats
+
     def analyze_async(self, callback):
         """Analiza en thread separado para no bloquear UI. callback(error, result)"""
         thread = threading.Thread(target=self._analyze_threaded, args=(callback,), daemon=True)

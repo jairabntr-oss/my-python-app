@@ -105,7 +105,8 @@ class TestLayoutConfig(unittest.TestCase):
         ]
 
         posiciones = engine._calcular_posiciones(bloques, pares_overlap=[])
-        self.assertEqual(posiciones["0_0"][0], -0.1)
+        # el id ahora incluye indice de bloque: "{b_idx}_{idx_oracion}_{i}"
+        self.assertEqual(posiciones["0_0_0"][0], -0.1)
 
 
 class TestSeSolapa(unittest.TestCase):
