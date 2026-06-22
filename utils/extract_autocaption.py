@@ -1,8 +1,10 @@
 """
-Extrae las oraciones del auto-caption sin editar de un draft de CapCut.
+Extrae las oraciones del auto-caption de un draft de CapCut v167+.
 
-El criterio es: si el texto reconstruido desde el campo 'words' coincide exactamente 
-con el texto del segmento, es auto-caption sin editar (no fue modificado manualmente).
+La estructura que buscamos está en materials.texts[].words con:
+- start_time: array de timings en milisegundos
+- end_time: array de timings en milisegundos  
+- text: array de palabras (incluyendo espacios)
 """
 
 import json
@@ -12,11 +14,11 @@ from typing import List, Dict, Tuple
 
 
 class AutocaptionExtractor:
-    """Extrae auto-caption sin editar del draft de CapCut v167+."""
+    """Extrae auto-caption del draft de CapCut v167+."""
     
     @staticmethod
     def extract(json_path: str) -> Tuple[List[List[Dict]], Dict]:
-        """Extrae oraciones de auto-caption sin editar.
+        """Extrae oraciones con palabras y timings.
         
         Returns:
             (oraciones, stats)
@@ -29,100 +31,72 @@ class AutocaptionExtractor:
         
         oraciones = []
         stats = {
-            "total_tracks": 0,
-            "tracks_texto": 0,
-            "segments": 0,
-            "oraciones_validas": 0,
-            "detalles": []
+            "total_materials": 0,
+            "materiales_con_words": 0,
+            "oraciones_extraidas": 0
         }
         
-        # Obtener lista de materiales de texto
+        # Obtener materiales de texto
         materials_texts = draft.get('materials', {}).get('texts', [])
-        material_dict = {m.get('id'): m for m in materials_texts}
+        stats["total_materials"] = len(materials_texts)
         
-        # Buscar en todos los tracks
-        for track_idx, track in enumerate(draft.get('tracks', [])):
-            stats["total_tracks"] += 1
-            
-            # Solo procesar tracks de texto
-            if track.get('type') != 'text':
+        # Procesar cada material de texto
+        for material in materials_texts:
+            # Verificar que tenga campo 'words'
+            words_data = material.get('words', {})
+            if not words_data:
                 continue
             
-            stats["tracks_texto"] += 1
-            track_name = track.get('extra', {}).get('track_name', f'Track {track_idx}')
+            stats["materiales_con_words"] += 1
             
-            # Procesar segmentos del track
-            for seg_idx, segment in enumerate(track.get('segments', [])):
-                stats["segments"] += 1
-                
-                material_id = segment.get('material_id')
-                if not material_id:
-                    continue
-                
-                material = material_dict.get(material_id)
-                if not material:
-                    continue
-                
-                # Extraer palabras con timings
-                oracion = AutocaptionExtractor._extraer_palabras_del_material(
-                    material, segment
-                )
-                
-                if oracion:
-                    oraciones.append(oracion)
-                    stats["oraciones_validas"] += 1
-                    stats["detalles"].append({
-                        "track": track_name,
-                        "segment": seg_idx,
-                        "palabras": len(oracion),
-                        "texto": " ".join(p["word"] for p in oracion)
-                    })
+            # Extraer palabras con timings
+            oracion = AutocaptionExtractor._extraer_oracion(words_data)
+            
+            if oracion:
+                oraciones.append(oracion)
+                stats["oraciones_extraidas"] += 1
         
         return oraciones, stats
     
     @staticmethod
-    def _extraer_palabras_del_material(material: Dict, segment: Dict) -> List[Dict]:
-        """Extrae palabras con timings exactos de un material de texto."""
+    def _extraer_oracion(words_data: Dict) -> List[Dict]:
+        """Extrae una oración individual con palabras y timings.
         
-        # Buscar datos de palabras
-        words_data = material.get('content', {}).get('words', {})
-        if not words_data:
+        En CapCut v167, los timings están en milisegundos.
+        Retorna oraciones en microsegundos (multiplicando por 1000).
+        """
+        
+        text_list = words_data.get('text', [])
+        start_times_ms = words_data.get('start_time', [])
+        end_times_ms = words_data.get('end_time', [])
+        
+        if not text_list or not start_times_ms:
             return []
         
-        # En CapCut v167, los timings pueden estar en diferentes lugares
-        words_list = words_data.get('text', [])
-        start_times = words_data.get('start_time', [])
-        end_times = words_data.get('end_time', [])
-        
-        # Si no hay timings individuales, usar el timing del segmento
-        if not start_times or not end_times:
-            start = segment.get('target_timerange', {}).get('start', 0)
-            duracion = segment.get('target_timerange', {}).get('duration', 0)
-            
-            # Distribuir timings uniformemente
-            paso = duracion // len(words_list) if words_list else 0
-            start_times = [start + i * paso for i in range(len(words_list))]
-            end_times = [start + (i + 1) * paso for i in range(len(words_list))]
-        
-        # Construir oracion
         oracion = []
-        for i, word in enumerate(words_list):
-            palabra_limpia = word.strip()
+        
+        for i, palabra_raw in enumerate(text_list):
+            # Limpiar palabra
+            palabra = palabra_raw.strip()
             
-            # Ignorar espacios y caracteres vacíos
-            if not palabra_limpia:
+            # Ignorar espacios puros
+            if not palabra or palabra == " ":
                 continue
             
-            # Obtener timings
-            start_us = int(start_times[i]) if i < len(start_times) else 0
-            end_us = int(end_times[i]) if i < len(end_times) else 0
+            # Obtener timings en milisegundos
+            start_ms = start_times_ms[i] if i < len(start_times_ms) else 0
+            end_ms = end_times_ms[i] if i < len(end_times_ms) else 0
             
-            # Validar timings
+            # Convertir a microsegundos
+            start_us = int(start_ms * 1000)
+            end_us = int(end_ms * 1000)
+            
+            # Si el timing es 0, usar duración estimada
             if end_us <= start_us:
-                end_us = start_us + 100_000  # 100ms por defecto
+                end_us = start_us + 100_000  # 100ms estimado
             
             oracion.append({
-                "word": palabra_limpia,
+                "word": palabra,
                 "start_us": start_us,
                 "end_us": end_us
             })
@@ -134,7 +108,7 @@ def main():
     """Script principal."""
     if len(sys.argv) < 2:
         print("Uso: python utils/extract_autocaption.py <ruta_json>")
-        print("  Ejemplo: python utils/extract_autocaption.py C:\\Users\\user2\\Desktop\\draft_arrizzo8.json")
+        print("  Ejemplo: python utils/extract_autocaption.py C:\\\\Users\\\\user2\\\\Desktop\\\\draft_arrizzo8.json")
         sys.exit(1)
     
     json_path = sys.argv[1]
@@ -153,10 +127,9 @@ def main():
     
     # Mostrar estadísticas
     print(f"📊 Estadísticas:")
-    print(f"  - Tracks totales: {stats['total_tracks']}")
-    print(f"  - Tracks de texto: {stats['tracks_texto']}")
-    print(f"  - Segmentos: {stats['segments']}")
-    print(f"  - Oraciones extraídas: {stats['oraciones_validas']}")
+    print(f"  - Materiales de texto totales: {stats['total_materials']}")
+    print(f"  - Materiales con 'words': {stats['materiales_con_words']}")
+    print(f"  - Oraciones extraídas: {stats['oraciones_extraidas']}")
     total_palabras = sum(len(o) for o in oraciones)
     print(f"  - Total de palabras: {total_palabras}")
     
@@ -172,13 +145,16 @@ def main():
         print(f"\n📝 Preview - Primeras 5 oraciones:")
         for i, oracion in enumerate(oraciones[:5]):
             palabras = [p['word'] for p in oracion]
-            print(f"  {i+1}. {' '.join(palabras)}")
+            tiempo_inicio = oracion[0]['start_us'] / 1e6 if oracion else 0
+            tiempo_fin = oracion[-1]['end_us'] / 1e6 if oracion else 0
+            print(f"  {i+1}. [{tiempo_inicio:.2f}s - {tiempo_fin:.2f}s] {' '.join(palabras)}")
     else:
         print(f"\n⚠️  No se encontraron oraciones en el JSON")
     
     print(f"\n💡 Próximos pasos:")
     print(f"   1. Verifica las oraciones en: {output_path}")
-    print(f"   2. Ejecuta: python test_integration_real.py '{json_path}' 'arrizzo 8' --generate")
+    print(f"   2. Cierra CapCut completamente")
+    print(f"   3. Ejecuta: python run_generation.py '{output_path}' 'arrizzo 8'")
 
 
 if __name__ == '__main__':
