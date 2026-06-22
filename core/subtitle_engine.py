@@ -3,11 +3,12 @@ Motor de generación de subtítulos estilo karaoke acumulativo.
 
 Resuelve errores del handoff:
 - Error #1: Usa load_template(), NO duplicate_as_template()
-- Error #4: Inyecta text_size + scale + type:"subtitle" + sombras a nivel raíz
+- Error #4: Usa TextStyle + ClipSettings (API real de pycapcut)
 - Error #5: Anclas ±0.20 + clamp para no cortar palabras
 - Error #6: Anti-colisión con bounding boxes simples
 - Error #7: Split en bloques ≤5 palabras en pausas ≥60ms
 - Error #9: Umbral ≥150ms para overlap real
+- Error #14: Distribución greedy en múltiples tracks para evitar SegmentOverlap
 """
 
 from typing import List, Dict, Tuple, Optional
@@ -95,7 +96,8 @@ class SubtitleEngine:
             "total_palabras": total_palabras,
             "total_bloques": len(bloques),
             "pares_overlap": len(pares_overlap),
-            "track_name": "AUTO_subtitulos"
+            "tracks": getattr(self, "_tracks_usados", []),
+            "total_tracks": len(getattr(self, "_tracks_usados", [])),
         }
     
     def _detectar_overlap_real(self, oraciones: List[List[dict]]) -> List[Tuple[int, int]]:
@@ -270,69 +272,95 @@ class SubtitleEngine:
         
         return posiciones
     
-    def _crear_segmentos(self, bloques: List[dict], posiciones: dict, 
+    def _crear_segmentos(self, bloques: List[dict], posiciones: dict,
                         pares_overlap: List[Tuple[int, int]]) -> int:
-        """Crea TextSegment en CapCut para cada palabra.
-        
-        Resuelve Error #4: inyecta TODOS los campos necesarios a nivel raíz:
-        - text_size
-        - scale_x/scale_y del clip
-        - type: "subtitle" (NO "text")
-        - shadow properties a nivel raíz
+        """Crea TextSegment en CapCut para cada palabra usando la API real de pycapcut.
+
+        Resuelve Error #4: usa TextStyle + ClipSettings (no TextMaterial ni add_material).
+        Resuelve Error #14: distribuye en múltiples tracks (AUTO_subtitulos_1, _2, …) para
+        evitar SegmentOverlap cuando el efecto acumulativo genera segmentos solapados en el tiempo.
         """
-        track_name = "AUTO_subtitulos"
-        total_palabras = 0
-        
+        # Recopilar datos de todos los segmentos
+        segmentos_data = []
         for bloque in bloques:
+            ultimo_end = bloque["palabras"][-1]["end_us"]
             for i, palabra_data in enumerate(bloque["palabras"]):
                 palabra_id = f"{bloque['idx_oracion']}_{i}"
                 x, y = posiciones.get(palabra_id, (0, 0))
-                
-                # Crear material de texto
-                material = cc.TextMaterial(
-                    text=palabra_data["word"],
-                    font_path=self.profile.get("font_path", ""),
-                    text_size=self.profile.get("text_size", 30),
-                    text_color=self.profile.get("text_color", "#FFFFFF"),
-                )
-                
-                # ⚠️ Inyectar campos a nivel RAÍZ (Resuelve Error #4)
-                material.type = "subtitle"  # NO "text"
-                material.alignment = 1  # Centrado
-                
-                # Sombras a nivel raíz
-                if self.profile.get("shadow_enabled", True):
-                    material.has_shadow = True
-                    material.shadow_color = self.profile.get("shadow_color", "#000000")
-                    material.shadow_alpha = self.profile.get("shadow_alpha", 0.33)
-                    material.shadow_distance = self.profile.get("shadow_distance", 17.0)
-                    material.shadow_angle = self.profile.get("shadow_angle", -115.9)
-                
-                self.script.add_material(material)
-                
-                # Crear segmento de texto
                 start_us = palabra_data["start_us"]
-                end_us = palabra_data["end_us"]
-                
-                # EFECTO ACUMULATIVO: extender duración hasta próxima palabra
-                # para que la palabra "permanezca" en pantalla
-                if i < len(bloque["palabras"]) - 1:
-                    end_us = bloque["palabras"][i + 1]["start_us"]
-                
-                duracion = max(end_us - start_us, 1000)  # Mínimo 1ms
-                
-                segmento = cc.TextSegment(
-                    material,
-                    cc.Timerange(start_us, duracion)
-                )
-                
-                # Posicionar en pantalla
-                segmento.clip.transform.x = x
-                segmento.clip.transform.y = y
-                segmento.clip.scale.x = self.profile.get("scale_x", 1.67)
-                segmento.clip.scale.y = self.profile.get("scale_y", 1.67)
-                
-                self.script.add_segment(segmento, track_name)
-                total_palabras += 1
-        
-        return total_palabras
+                # EFECTO ACUMULATIVO: cada palabra dura hasta el fin de su bloque
+                duracion = max(ultimo_end - start_us, 1000)
+                segmentos_data.append({
+                    "text": palabra_data["word"],
+                    "start": start_us,
+                    "duracion": duracion,
+                    "x": x,
+                    "y": y,
+                })
+
+        # Ordenar por tiempo de inicio para que el greedy sea predecible
+        segmentos_data.sort(key=lambda s: s["start"])
+
+        # Distribución greedy: lista de (track_name, [(start, end), ...])
+        tracks: List[Tuple[str, List[Tuple[int, int]]]] = []
+
+        color_rgb = self._hex_to_rgb(self.profile.get("text_color", "#FFFFFF"))
+
+        for seg in segmentos_data:
+            seg_start = seg["start"]
+            seg_end = seg["start"] + seg["duracion"]
+
+            assigned = None
+            for idx_t, (tname, intervals) in enumerate(tracks):
+                if not self._se_solapa(intervals, seg_start, seg_end):
+                    assigned = idx_t
+                    break
+
+            if assigned is None:
+                track_num = len(tracks) + 1
+                tname = f"AUTO_subtitulos_{track_num}"
+                self.script.add_track(cc.TrackType.text, tname)
+                tracks.append((tname, []))
+                assigned = len(tracks) - 1
+
+            tname, intervals = tracks[assigned]
+
+            style = cc.TextStyle(
+                size=self.profile.get("text_size", 8.0),
+                color=color_rgb,
+                align=1,
+            )
+            clip = cc.ClipSettings(
+                transform_x=seg["x"],
+                transform_y=seg["y"],
+                scale_x=self.profile.get("scale_x", 1.67),
+                scale_y=self.profile.get("scale_y", 1.67),
+            )
+            ts = cc.TextSegment(
+                text=seg["text"],
+                timerange=cc.Timerange(seg["start"], seg["duracion"]),
+                style=style,
+                clip_settings=clip,
+            )
+            self.script.add_segment(ts, tname)
+            intervals.append((seg_start, seg_end))
+
+        self._tracks_usados = [tname for tname, _ in tracks]
+        return len(segmentos_data)
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _se_solapa(self, intervals: List[Tuple[int, int]], new_start: int, new_end: int) -> bool:
+        """Devuelve True si (new_start, new_end) se solapa con algún intervalo existente."""
+        for s, e in intervals:
+            if new_start < e and new_end > s:
+                return True
+        return False
+
+    def _hex_to_rgb(self, hex_color: str) -> Tuple[float, float, float]:
+        """Convierte color hex (#RRGGBB) a tupla (r, g, b) en rango [0, 1]."""
+        hex_color = hex_color.lstrip("#")
+        r = int(hex_color[0:2], 16) / 255.0
+        g = int(hex_color[2:4], 16) / 255.0
+        b = int(hex_color[4:6], 16) / 255.0
+        return (r, g, b)

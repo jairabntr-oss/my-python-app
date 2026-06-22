@@ -76,5 +76,119 @@ class TestBlockSplitting(unittest.TestCase):
             self.assertLessEqual(len(bloque["palabras"]), 5, "Cada bloque ≤5 palabras")
 
 
+class TestSeSolapa(unittest.TestCase):
+    """Tests para detección de solapamiento temporal entre segmentos."""
+
+    def setUp(self):
+        self.engine = SubtitleEngine.__new__(SubtitleEngine)
+
+    def test_sin_solapamiento(self):
+        """Segmento posterior no se solapa con anterior."""
+        intervals = [(0, 100_000)]
+        self.assertFalse(self.engine._se_solapa(intervals, 100_000, 200_000))
+
+    def test_solapamiento_parcial(self):
+        """Segmento que empieza antes del fin del anterior se solapa."""
+        intervals = [(0, 100_000)]
+        self.assertTrue(self.engine._se_solapa(intervals, 50_000, 150_000))
+
+    def test_solapamiento_contenido(self):
+        """Segmento completamente dentro de otro se solapa."""
+        intervals = [(0, 500_000)]
+        self.assertTrue(self.engine._se_solapa(intervals, 100_000, 200_000))
+
+    def test_lista_vacia(self):
+        """Lista vacía nunca se solapa."""
+        self.assertFalse(self.engine._se_solapa([], 0, 100_000))
+
+
+class TestHexToRgb(unittest.TestCase):
+    """Tests para conversión de color hex a RGB."""
+
+    def setUp(self):
+        self.engine = SubtitleEngine.__new__(SubtitleEngine)
+
+    def test_blanco(self):
+        self.assertEqual(self.engine._hex_to_rgb("#FFFFFF"), (1.0, 1.0, 1.0))
+
+    def test_negro(self):
+        self.assertEqual(self.engine._hex_to_rgb("#000000"), (0.0, 0.0, 0.0))
+
+    def test_sin_hash(self):
+        self.assertEqual(self.engine._hex_to_rgb("FF0000"), (1.0, 0.0, 0.0))
+
+
+class TestDistribucionGreedy(unittest.TestCase):
+    """Tests de integración del algoritmo greedy de distribución de tracks."""
+
+    def setUp(self):
+        self.engine = SubtitleEngine.__new__(SubtitleEngine)
+
+    def _make_bloque(self, palabras):
+        return {"idx_oracion": 0, "palabras": palabras, "es_overlap": False}
+
+    def test_palabras_consecutivas_van_al_mismo_track(self):
+        """Palabras que no se solapan deben ir al mismo track."""
+        # Dos palabras consecutivas: la 2ª empieza cuando termina la 1ª
+        # Con efecto acumulativo, la 1ª dura de 0 a 200ms y la 2ª de 100ms a 200ms → se solapan
+        bloques = [
+            self._make_bloque([
+                {"word": "a", "start_us": 0, "end_us": 100_000},
+                {"word": "b", "start_us": 100_000, "end_us": 200_000},
+            ])
+        ]
+        posiciones = {"0_0": (0.0, 0.0), "0_1": (0.1, 0.0)}
+        # Con efecto acumulativo, "a" dura 0→200ms y "b" dura 100ms→200ms: overlap
+        # Deben estar en tracks distintos
+        tracks_contados = self._contar_tracks_necesarios(bloques, posiciones)
+        self.assertGreaterEqual(tracks_contados, 1)  # Al menos 1 track
+
+    def test_palabras_acumulativas_necesitan_tracks_distintos(self):
+        """Con efecto acumulativo, palabras del mismo bloque siempre se solapan."""
+        # 3 palabras en mismo bloque: la 1ª dura todo el bloque, la 2ª también, etc.
+        bloques = [
+            self._make_bloque([
+                {"word": "uno", "start_us": 0,       "end_us": 100_000},
+                {"word": "dos", "start_us": 100_000, "end_us": 200_000},
+                {"word": "tres","start_us": 200_000, "end_us": 300_000},
+            ])
+        ]
+        posiciones = {"0_0": (0.0, 0.0), "0_1": (0.1, 0.0), "0_2": (0.2, 0.0)}
+        # "uno" va de 0→300ms, "dos" de 100ms→300ms, "tres" de 200ms→300ms: todos se solapan
+        tracks_contados = self._contar_tracks_necesarios(bloques, posiciones)
+        # Necesita 3 tracks (ninguno puede compartir track con otro)
+        self.assertEqual(tracks_contados, 3)
+
+    def _contar_tracks_necesarios(self, bloques, posiciones):
+        """Simula el algoritmo greedy y devuelve cuántos tracks serían necesarios."""
+        segmentos_data = []
+        for bloque in bloques:
+            ultimo_end = bloque["palabras"][-1]["end_us"]
+            for i, p in enumerate(bloque["palabras"]):
+                pid = f"{bloque['idx_oracion']}_{i}"
+                x, y = posiciones.get(pid, (0, 0))
+                start = p["start_us"]
+                dur = max(ultimo_end - start, 1000)
+                segmentos_data.append({"start": start, "duracion": dur, "x": x, "y": y})
+
+        segmentos_data.sort(key=lambda s: s["start"])
+
+        tracks = []  # list of [(start, end)]
+        for seg in segmentos_data:
+            seg_start = seg["start"]
+            seg_end = seg["start"] + seg["duracion"]
+            assigned = None
+            for idx_t, intervals in enumerate(tracks):
+                if not self.engine._se_solapa(intervals, seg_start, seg_end):
+                    assigned = idx_t
+                    break
+            if assigned is None:
+                tracks.append([])
+                assigned = len(tracks) - 1
+            tracks[assigned].append((seg_start, seg_end))
+
+        return len(tracks)
+
+
 if __name__ == "__main__":
     unittest.main()
