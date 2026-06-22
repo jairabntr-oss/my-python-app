@@ -61,9 +61,17 @@ class Step1Frame(ctk.CTkFrame):
         self.analyze_btn.configure(state="disabled", text="Analizando...")
         self.progress.set(0.2)
         self.update_idletasks()
-        
-        manager = DraftManager(file_path)
-        manager.analyze_async(callback=self.on_analysis_complete)
+
+        try:
+            manager = DraftManager(file_path)
+            manager.analyze_async(
+                callback=lambda error, result: self.after(
+                    0,
+                    lambda: self.on_analysis_complete(error, result),
+                )
+            )
+        except Exception as e:
+            self.on_analysis_complete(e, None)
 
     def on_analysis_complete(self, error, result):
         self.progress.set(1.0)

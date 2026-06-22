@@ -4,7 +4,6 @@ Usa pycapcut para acceder a los drafts y aplicar el formato aprendido
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 from .learning_engine import LearningEngine
