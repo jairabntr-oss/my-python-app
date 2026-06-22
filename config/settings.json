@@ -1,23 +1,51 @@
 {
-  "app_name": "My Python App",
-  "version": "1.0.0",
-  "author": "Your Name",
-  "description": "A brief description of your application.",
-  "settings": {
-    "theme": "light",
-    "language": "en",
-    "notifications": true,
-    "auto_save": false
+  "app_name": "CapCut Auto-Subtitle System v2.1",
+  "version": "2.1.0",
+  "capcut": {
+    "default_projects_path": "C:\\Users\\{USER}\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft",
+    "auto_caption_track_names": [
+      "auto_caption",
+      "Reconocimiento de voz",
+      "Auto captions"
+    ]
   },
-  "database": {
-    "host": "localhost",
-    "port": 5432,
-    "user": "your_username",
-    "password": "your_password",
-    "database_name": "my_database"
+  "subtitle_style": {
+    "font_path": "",
+    "text_size": 30,
+    "text_color": "#FFFFFF",
+    "scale_x": 1.67,
+    "scale_y": 1.67,
+    "alignment": 1,
+    "type": "subtitle",
+    "shadow_enabled": true,
+    "shadow_color": "#000000",
+    "shadow_alpha": 0.33,
+    "shadow_angle": -115.9,
+    "shadow_distance": 17.0
   },
-  "api": {
-    "base_url": "https://api.example.com",
-    "timeout": 30
+  "layout": {
+    "ancla_izquierda": -0.20,
+    "ancla_derecha": 0.20,
+    "ancho_por_caracter": 0.15,
+    "paso_y_corto": 0.05,
+    "paso_y_largo": 0.10,
+    "max_palabras_por_bloque": 5,
+    "limite_y_arriba": -0.4,
+    "limite_y_abajo": 0.4
+  },
+  "overlap_detection": {
+    "umbral_overlap_real_us": 150000,
+    "pausa_minima_split_us": 60000
+  },
+  "clicks": {
+    "modo_default": "2_por_oracion",
+    "volumen": 0.4,
+    "nombre_track": "AUTO_clicks"
+  },
+  "safety": {
+    "siempre_cerrar_capcut": true,
+    "crear_backup_antes": true,
+    "limpiar_tracks_antes": true,
+    "validar_datos_antes": true
   }
 }
