@@ -1,0 +1,83 @@
+diff --git a/core/subtitle_engine.py b/core/subtitle_engine.py
+index f524b5f..0cff26a 100644
+--- a/core/subtitle_engine.py
++++ b/core/subtitle_engine.py
+@@ -221,6 +221,12 @@ class SubtitleEngine:
+         - Espaciado vertical variable según largo de palabra
+         """
+         posiciones = {}  # palabra_id → (x, y)
++        # cajas del ULTIMO bloque generado en cada zona de pantalla ("normal",
++        # "arriba", "abajo"), junto con hasta cuando siguen visibles. Sirve
++        # para no colocar el bloque siguiente encima si todavia se solapan
++        # en tiempo (bug detectado: bloques consecutivos muy seguidos podian
++        # quedar literalmente en la misma posicion por unos frames).
++        ultimo_bloque_por_zona = {}  # zona -> (fin_visible_us, [cajas])
+ 
+         for b_idx, bloque in enumerate(bloques):
+             es_overlap_segundo = any(
+@@ -229,10 +235,24 @@ class SubtitleEngine:
+ 
+             if bloque["es_overlap"]:
+                 y_zona_min, y_zona_max = (-0.4, -0.05) if es_overlap_segundo else (0.05, 0.4)
++                zona = "abajo" if es_overlap_segundo else "arriba"
+             else:
+                 y_zona_min, y_zona_max = -0.4, 0.4
++                zona = "normal"
++
++            palabras_bloque = bloque["palabras"]
++            inicio_bloque = int(palabras_bloque[0]["start_us"]) if palabras_bloque else 0
++            fin_visible_bloque = int(palabras_bloque[-1]["end_us"]) if palabras_bloque else 0
+ 
+             cajas_ocupadas = []
++            anterior = ultimo_bloque_por_zona.get(zona)
++            if anterior is not None:
++                fin_anterior, cajas_anterior = anterior
++                if fin_anterior > inicio_bloque:
++                    # el bloque anterior en esta misma zona todavia esta
++                    # visible cuando arranca este -> heredar sus cajas para
++                    # que el anti-colision no se solape con el
++                    cajas_ocupadas = list(cajas_anterior)
+             y_actual = y_zona_min + 0.08
+ 
+             for i, palabra_data in enumerate(bloque["palabras"]):
+@@ -256,7 +276,10 @@ class SubtitleEngine:
+                         distancia_x = abs(x - cx)
+                         distancia_y = abs(y_actual - cy)
+                         min_dist_x = (ancho_palabra + cw) / 2 + 0.02
+-                        min_dist_y = 0.08
++                        # debe ser MENOR que PASO_Y_CORTO (0.05): si no, hasta
++                        # palabras correctamente espaciadas por el avance
++                        # normal "chocan" y se reempujan entre si.
++                        min_dist_y = 0.04
+ 
+                         if distancia_x < min_dist_x and distancia_y < min_dist_y:
+                             choca = True
+@@ -265,7 +288,10 @@ class SubtitleEngine:
+                     if not choca:
+                         break
+ 
+-                    y_actual -= 0.05
++                    # BUG corregido: antes restaba (empujaba hacia el techo
++                    # de la zona, amontonando todo en un punto). El zigzag
++                    # fluye hacia ABAJO en pantalla -> hay que sumar.
++                    y_actual += 0.05
+                     intento += 1
+ 
+                 palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
+@@ -276,8 +302,16 @@ class SubtitleEngine:
+ 
+                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
+                 y_actual += paso
++                # clamp contra el PISO de la zona (y_zona_max es el limite de
++                # abajo en este sistema, ya que Y crece hacia abajo en pantalla)
+                 y_actual = min(y_actual, y_zona_max - 0.08)
+ 
++            # guardar el estado de este bloque para que el SIGUIENTE bloque
++            # en la misma zona sepa que posiciones evitar si todavia se
++            # solapan en tiempo (arregla colisiones entre bloques consecutivos
++            # muy seguidos, detectado con datos reales)
++            ultimo_bloque_por_zona[zona] = (fin_visible_bloque, cajas_ocupadas)
++
+         return posiciones
+ 
+     # ── Creación de segmentos ─────────────────────────────────────────────────
