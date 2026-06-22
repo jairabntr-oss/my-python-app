@@ -265,7 +265,16 @@ class SubtitleEngine:
             for i, palabra_data in enumerate(bloque["palabras"]):
                 palabra = palabra_data["word"]
                 ancho_por_caracter = getattr(self, "ancho_por_caracter", self.ANCHO_POR_CARACTER)
-                ancho_palabra = len(palabra) * ancho_por_caracter
+                # ancho_por_caracter esta calibrado en unidades de ANCHO TOTAL
+                # de pantalla (ver ANALISIS_FORMATO_ESTILO.md: "tecnologia", 10
+                # letras, ocupa ~75% del ancho -> 10*0.15=1.5 sobre una escala
+                # 0..2). Pero x/anclas estan en unidades de CapCut transform_x
+                # (-1..1, mitad de pantalla = 1.0). Hay que pasar el ancho a
+                # esa MISMA escala antes de usarlo en clamps/colision, sino
+                # las palabras largas (7+ letras) miden "más" que la pantalla
+                # entera y el clamp de X se invierte (bug: todas las palabras
+                # largas terminaban exactamente en el mismo punto).
+                ancho_palabra = (len(palabra) * ancho_por_caracter) / 2
 
                 ancla_izquierda = getattr(self, "ancla_izquierda", self.ANCLA_IZQUIERDA)
                 ancla_derecha = getattr(self, "ancla_derecha", self.ANCLA_DERECHA)
@@ -274,10 +283,23 @@ class SubtitleEngine:
                 if len(palabra) >= 8:
                     x *= 0.5
 
-                x = max(-0.45 + ancho_palabra / 2, min(0.45 - ancho_palabra / 2, x))
+                x_lo = -0.45 + ancho_palabra / 2
+                x_hi = 0.45 - ancho_palabra / 2
+                if x_lo <= x_hi:
+                    x = max(x_lo, min(x_hi, x))
+                else:
+                    # la palabra es mas ancha que el rango disponible: no hay
+                    # clamp valido, centrar en 0 en vez de devolver siempre
+                    # x_lo (que es lo que hacia max(lo, min(hi, x)) cuando
+                    # lo > hi, aplastando todas las palabras largas al mismo
+                    # punto sin importar su x original).
+                    x = 0.0
 
                 intento = 0
-                while intento < 5:
+                MAX_INTENTOS_COLISION = 10  # antes 5: insuficiente para
+                # bloques de 5 palabras cortas muy juntas; con 5 a veces se
+                # agotaban los intentos sin destrabar la colision.
+                while intento < MAX_INTENTOS_COLISION:
                     choca = False
                     for (cx, cy, cw) in cajas_ocupadas:
                         distancia_x = abs(x - cx)
@@ -302,8 +324,19 @@ class SubtitleEngine:
                     intento += 1
 
                 palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
-                # clamp final: nunca fuera de la zona visible de pantalla
-                y_guardado = max(y_zona_min, min(y_zona_max, y_actual))
+                # Clamp final "blando": antes este clamp aplastaba contra
+                # y_zona_max a TODAS las palabras que se hubieran ido de
+                # rango por el anti-colision, haciendo que terminaran todas
+                # en la MISMA posicion Y (amontonadas). Ahora solo recorta
+                # si la palabra se fue muy lejos (mas de 1 paso extra), y deja
+                # que el resultado normal del anti-colision se respete dentro
+                # de un margen razonable aunque exceda ligeramente la zona
+                # "blanda" original.
+                margen_extra = 0.15
+                y_guardado = max(
+                    y_zona_min - margen_extra,
+                    min(y_zona_max + margen_extra, y_actual),
+                )
                 posiciones[palabra_id] = (x, y_guardado)
                 cajas_ocupadas.append((x, y_guardado, ancho_palabra))
 
