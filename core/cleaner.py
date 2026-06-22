@@ -1,14 +1,68 @@
-def clean_data(data):
-    # Implement data cleaning logic here
-    cleaned_data = data.strip()  # Example: stripping whitespace
-    return cleaned_data
+"""
+Limpieza de tracks residuales con prefijo "AUTO_" en un draft de CapCut.
 
-def remove_empty_entries(data_list):
-    # Remove empty entries from the list
-    return [entry for entry in data_list if entry]
+Solo elimina tracks de imported_tracks (los provenientes del JSON existente)
+cuyo nombre empiece con "AUTO_".  Los tracks manuales del usuario nunca
+se tocan.
+"""
 
-def normalize_text(text):
-    # Normalize text for processing
-    return text.lower()  # Example: converting to lowercase
 
-# Additional cleaning functions can be added as needed
+class Cleaner:
+    """Elimina tracks residuales "AUTO_" de un script de CapCut ya cargado."""
+
+    PREFIJO = "AUTO_"
+
+    def __init__(self, script):
+        """
+        Args:
+            script: objeto ScriptFile devuelto por DraftFolder.load_template()
+        """
+        self.script = script
+
+    # ── API pública ────────────────────────────────────────────────────────────
+
+    def limpiar_tracks_texto(self) -> int:
+        """Elimina tracks de texto con prefijo AUTO_.
+
+        Returns:
+            Cantidad de tracks eliminados.
+        """
+        return self._eliminar_tracks("text")
+
+    def limpiar_tracks_audio(self) -> int:
+        """Elimina tracks de audio con prefijo AUTO_.
+
+        Returns:
+            Cantidad de tracks eliminados.
+        """
+        return self._eliminar_tracks("audio")
+
+    def limpiar_todos(self) -> dict:
+        """Limpia texto Y audio en una sola llamada.
+
+        Returns:
+            {"texto": n_texto, "audio": n_audio}
+        """
+        return {
+            "texto": self.limpiar_tracks_texto(),
+            "audio": self.limpiar_tracks_audio(),
+        }
+
+    # ── Internos ───────────────────────────────────────────────────────────────
+
+    def _eliminar_tracks(self, tipo: str) -> int:
+        """Elimina de imported_tracks los que sean del tipo indicado y "AUTO_".
+
+        Args:
+            tipo: "text" o "audio"
+
+        Returns:
+            Cantidad de tracks eliminados.
+        """
+        residuales = [
+            t for t in self.script.imported_tracks
+            if t.track_type.name == tipo and t.name.startswith(self.PREFIJO)
+        ]
+        for track in residuales:
+            self.script.imported_tracks.remove(track)
+        return len(residuales)

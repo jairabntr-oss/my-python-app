@@ -1,6 +1,9 @@
 import customtkinter as ctk
 from config import APP_WIDTH, APP_HEIGHT, APP_MIN_WIDTH, APP_MIN_HEIGHT, COLORS
 from ui.step1_project import Step1Frame
+from ui.step2_style import Step2Frame
+from ui.step3_audio import Step3Frame
+from ui.step4_execute import Step4Frame
 
 class MainWindow(ctk.CTk):
     def __init__(self):
@@ -9,8 +12,12 @@ class MainWindow(ctk.CTk):
         self.geometry(f"{APP_WIDTH}x{APP_HEIGHT}")
         self.minsize(APP_MIN_WIDTH, APP_MIN_HEIGHT)
 
+        # Estado compartido entre pasos
         self.draft_path = ctk.StringVar()
         self.analysis_result = None
+        self.style_profile = None
+        self.ruta_sonido = None
+        self.modo_clicks = "2_por_oracion"
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -38,15 +45,12 @@ class MainWindow(ctk.CTk):
         self.content.grid_rowconfigure(0, weight=1)
         self.content.grid_columnconfigure(0, weight=1)
 
-        self.frames = {}
-        self.frames["step1"] = Step1Frame(self.content, self)
-        
-        for step_name in ["step2", "step3", "step4"]:
-            frame = ctk.CTkFrame(self.content, corner_radius=10)
-            frame.grid_columnconfigure(0, weight=1)
-            frame.grid_rowconfigure(0, weight=1)
-            ctk.CTkLabel(frame, text=f"Pantalla {step_name} (Próximamente)", font=ctk.CTkFont(size=16)).grid(row=0, column=0, pady=50)
-            self.frames[step_name] = frame
+        self.frames = {
+            "step1": Step1Frame(self.content, self),
+            "step2": Step2Frame(self.content, self),
+            "step3": Step3Frame(self.content, self),
+            "step4": Step4Frame(self.content, self),
+        }
 
         for frame in self.frames.values():
             frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
