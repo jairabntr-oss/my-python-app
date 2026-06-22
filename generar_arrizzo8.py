@@ -63,8 +63,14 @@ def main():
         draft_folder = sys.argv[1]
     else:
         # Intentar ruta por defecto de Windows
-        draft_folder = (
-            r"C:\Users\user2\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
+        draft_folder = str(
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "CapCut"
+            / "User Data"
+            / "Projects"
+            / "com.lveditor.draft"
         )
         print(f"\n⚠️  No se indicó carpeta. Usando: {draft_folder}")
 
