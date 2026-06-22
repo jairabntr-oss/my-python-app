@@ -1,80 +1,79 @@
 """
-Cleaner - Elimina tracks residuales de generaciones previas en un script de CapCut.
+Limpieza de tracks residuales con prefijo "AUTO_" en un draft de CapCut.
 
-Los tracks que comienzan con el prefijo "AUTO_" son creados por esta aplicación
-y deben limpiarse antes de una nueva generación para evitar duplicados.
+Solo elimina tracks de imported_tracks (los provenientes del JSON existente)
+cuyo nombre empiece con "AUTO_".  Los tracks manuales del usuario nunca
+se tocan.
 """
-
-from typing import Any
-
-
-PREFIJO_AUTO = "AUTO_"
 
 
 class Cleaner:
-    """Limpia tracks de texto y audio residuales de generaciones anteriores."""
+    """Elimina tracks residuales "AUTO_" de un script de CapCut ya cargado."""
 
-    def __init__(self, script: Any) -> None:
+    PREFIJO = "AUTO_"
+
+    def __init__(self, script):
         """
         Args:
-            script: script de CapCut cargado con pycapcut (load_template).
+            script: objeto ScriptFile devuelto por DraftFolder.load_template()
         """
         self.script = script
 
+    # ── API pública ────────────────────────────────────────────────────────────
+
     def limpiar_tracks_texto(self) -> int:
-        """Elimina tracks de texto cuyo nombre empiece con 'AUTO_'.
+        """Elimina tracks de texto con prefijo AUTO_.
 
         Returns:
-            Número de tracks eliminados.
+            Cantidad de tracks eliminados.
         """
-        return self._limpiar_tracks(tipo="text")
+        return self._eliminar_tracks("text")
 
     def limpiar_tracks_audio(self) -> int:
-        """Elimina tracks de audio cuyo nombre empiece con 'AUTO_'.
+        """Elimina tracks de audio con prefijo AUTO_.
 
         Returns:
-            Número de tracks eliminados.
+            Cantidad de tracks eliminados.
         """
-        return self._limpiar_tracks(tipo="audio")
+        return self._eliminar_tracks("audio")
 
-    def _limpiar_tracks(self, tipo: str) -> int:
-        """Elimina tracks del tipo indicado que tengan prefijo AUTO_.
+    def limpiar_todos(self) -> dict:
+        """Limpia texto Y audio en una sola llamada.
+
+        Returns:
+            {"texto": n_texto, "audio": n_audio}
+        """
+        return {
+            "texto": self.limpiar_tracks_texto(),
+            "audio": self.limpiar_tracks_audio(),
+        }
+
+    # ── Internos ───────────────────────────────────────────────────────────────
+
+    def _eliminar_tracks(self, tipo: str) -> int:
+        """Elimina de imported_tracks los que sean del tipo indicado y "AUTO_".
 
         Args:
-            tipo: "text" o "audio".
+            tipo: "text" o "audio"
 
         Returns:
-            Número de tracks eliminados.
+            Cantidad de tracks eliminados.
         """
-        eliminados = 0
-        tracks_a_borrar = [
-            track
-            for track in getattr(self.script, "imported_tracks", [])
-            if getattr(track, "name", "").startswith(PREFIJO_AUTO)
-            and getattr(track, "type", "") == tipo
+        residuales = [
+            t for t in self.script.imported_tracks
+            if self._es_tipo_track(t, tipo) and t.name.startswith(self.PREFIJO)
         ]
-        for track in tracks_a_borrar:
+        for track in residuales:
             try:
-                self.script.remove_track(track)
-                eliminados += 1
-            except AttributeError:
-                # Fallback: intentar remover por nombre si la API lo admite
-                pass
-        return eliminados
+                self.script.imported_tracks.remove(track)
+            except ValueError:
+                if hasattr(self.script, "remove_track"):
+                    self.script.remove_track(track)
+        return len(residuales)
 
-
-# ── Funciones utilitarias de limpieza de texto ───────────────────────────────
-
-def clean_data(data: str) -> str:
-    """Retorna la cadena sin espacios en los extremos."""
-    return data.strip()
-
-
-def remove_empty_entries(data_list: list) -> list:
-    """Retorna la lista sin entradas vacías o falsy."""
-    return [entry for entry in data_list if entry]
-
-
-def normalize_text(text: str) -> str:
-    """Retorna el texto en minúsculas para normalización."""
-    return text.lower()
+    def _es_tipo_track(self, track, tipo: str) -> bool:
+        """Compatibilidad entre distintas formas de exponer el tipo de track."""
+        track_type = getattr(track, "track_type", None)
+        if track_type is not None:
+            return getattr(track_type, "name", "") == tipo
+        return getattr(track, "type", "") == tipo
