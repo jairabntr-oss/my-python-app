@@ -8,7 +8,13 @@ Resuelve errores del handoff:
 
 import os
 from typing import List, Dict
-import pycapcut as cc
+
+try:
+    import pycapcut as cc
+    _PYCAPCUT_AVAILABLE = True
+except ImportError:
+    cc = None  # type: ignore[assignment]
+    _PYCAPCUT_AVAILABLE = False
 
 
 class ClickEngine:

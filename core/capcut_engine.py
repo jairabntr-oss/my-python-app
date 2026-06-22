@@ -270,3 +270,78 @@ class CapcutEngine:
         
         except Exception as e:
             return {"error": str(e)}
+
+    def generate_subtitles_for_project(
+        self,
+        project_name: str,
+        track_name: str = "AUTO_subtitles",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Pipeline completo: extrae captions y genera subtítulos karaoke.
+
+        Args:
+            project_name: nombre del draft de CapCut.
+            track_name: nombre del track de texto a crear.
+            dry_run: si True, sólo simula sin escribir en disco.
+
+        Returns:
+            Dict con estadísticas de la generación o clave "error".
+        """
+        try:
+            # 1. Extraer captions del draft
+            oraciones = self.extract_captions_from_draft(project_name)
+            if not oraciones:
+                return {"error": "No se encontraron captions en el proyecto"}
+
+            # 2. Detectar diálogos simultáneos
+            pares_overlap = self.detect_simultaneous_dialog(oraciones)
+
+            # 3. Dividir oraciones largas en bloques
+            bloques: List[List[Dict[str, Any]]] = []
+            for oracion in oraciones:
+                bloques.extend(self.split_long_sentence(oracion))
+
+            # 4. Calcular posiciones (zigzag + anti-colisión)
+            total_palabras = sum(len(b) for b in bloques)
+
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "total_words": total_palabras,
+                    "total_blocks": len(bloques),
+                    "simultaneous_dialogs": len(pares_overlap),
+                    "track_created": track_name,
+                }
+
+            # 5. Escribir en disco usando SubtitleEngine
+            from .subtitle_engine import SubtitleEngine
+
+            profile = {
+                **self.config.get("text_format", {}),
+                **self.visual_settings,
+                "font_path": self.config.get("text_format", {}).get("font_path", ""),
+                "text_size": self.config.get("text_format", {}).get("size", 30),
+                "text_color": self.config.get("text_format", {}).get("color", "#FFFFFF"),
+                "scale_x": self.visual_settings.get("scale", 1.67),
+                "scale_y": self.visual_settings.get("scale", 1.67),
+                "shadow_enabled": self.config.get("text_format", {}).get("shadow", {}).get("enabled", True),
+                "shadow_color": self.config.get("text_format", {}).get("shadow", {}).get("color", "#000000"),
+                "shadow_alpha": self.config.get("text_format", {}).get("shadow", {}).get("alpha", 0.33),
+                "shadow_distance": self.config.get("text_format", {}).get("shadow", {}).get("distance", 17.0),
+                "shadow_angle": self.config.get("text_format", {}).get("shadow", {}).get("angle", -115.9),
+            }
+
+            engine = SubtitleEngine(
+                str(self.get_drafts_folder()), project_name, profile
+            )
+            resultado = engine.generate(oraciones)
+
+            return {
+                "total_words": resultado.get("total_palabras", total_palabras),
+                "total_blocks": resultado.get("total_bloques", len(bloques)),
+                "simultaneous_dialogs": resultado.get("pares_overlap", len(pares_overlap)),
+                "track_created": track_name,
+            }
+
+        except Exception as e:
+            return {"error": str(e)}
