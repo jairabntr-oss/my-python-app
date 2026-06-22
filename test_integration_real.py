@@ -1,4 +1,4 @@
-"""
+r"""
 Script de integración completa para validar el sistema con un video real.
 
 Uso:
