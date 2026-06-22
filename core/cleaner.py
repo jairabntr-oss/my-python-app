@@ -48,6 +48,46 @@ class Cleaner:
             "audio": self.limpiar_tracks_audio(),
         }
 
+    def limpiar_autocaption_nativo(self) -> int:
+        """Elimina SOLO los segmentos de auto-caption nativo de CapCut (sin
+        editar), detectados por tener 'recognize_task_id' poblado en su
+        material. Esto distingue auto-caption real de texto manual del
+        usuario que pueda estar en un track sin nombre.
+
+        Llamar EXPLICITAMENTE (no es parte de limpiar_tracks_texto/limpiar_
+        todos) porque borra contenido que no tiene prefijo AUTO_ - solo se
+        debe usar despues de haber extraido sus datos (texto+timings).
+
+        Nota de implementacion: imported_materials['texts'] son dicts
+        crudos del JSON (no objetos), indexados por 'id'. Se cruza cada
+        segmento (que solo trae material_id) contra ese diccionario.
+
+        Returns:
+            Cantidad de segmentos eliminados.
+        """
+        materiales_texto = self.script.imported_materials.get("texts", []) or []
+        ids_autocaption = {
+            m.get("id") for m in materiales_texto if m.get("recognize_task_id")
+        }
+        if not ids_autocaption:
+            return 0
+
+        eliminados = 0
+        for track in list(self.script.imported_tracks):
+            if not self._es_tipo_track(track, "text"):
+                continue
+            a_borrar = [
+                seg for seg in track.segments
+                if seg.material_id in ids_autocaption
+            ]
+            for seg in a_borrar:
+                try:
+                    track.segments.remove(seg)
+                    eliminados += 1
+                except ValueError:
+                    pass
+        return eliminados
+
     # ── Internos ───────────────────────────────────────────────────────────────
 
     def _eliminar_tracks(self, tipo: str) -> int:

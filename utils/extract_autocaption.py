@@ -67,6 +67,29 @@ class AutocaptionExtractor:
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _offsets_por_material(draft) -> Dict[str, int]:
+        """Mapea material_id -> inicio absoluto (en las unidades crudas del
+        propio draft) de su segmento en el track de texto.
+
+        CRITICO: los arrays start_time/end_time dentro de 'words' son
+        RELATIVOS al inicio de cada linea/oracion, no al timeline absoluto
+        del video. Sin sumar este offset, todas las oraciones quedarian
+        ancladas a 0.00s (bug detectado con un draft real).
+        """
+        offsets = {}
+        for track in draft.get("tracks", []) or []:
+            if track.get("type") != "text":
+                continue
+            for seg in track.get("segments", []) or []:
+                mid = seg.get("material_id")
+                tr = seg.get("target_timerange", {}) or {}
+                start = tr.get("start")
+                if mid is not None and start is not None:
+                    offsets[mid] = int(start)
+        return offsets
+
+    # ------------------------------------------------------------------
+    @staticmethod
     def _detectar_multiplicador(median_dur_raw: int, max_raw: int, duration_us: int) -> int:
         """Factor para llevar timings crudos a microsegundos.
 
@@ -90,6 +113,7 @@ class AutocaptionExtractor:
     @staticmethod
     def _extraer_por_arrays(materials_texts, draft, stats) -> List[List[Dict]]:
         duration_us = int(draft.get("duration", 0) or 0)
+        offsets = AutocaptionExtractor._offsets_por_material(draft)
 
         # relevar maximo crudo y duraciones de palabra para detectar la unidad
         max_raw = 0
@@ -124,13 +148,19 @@ class AutocaptionExtractor:
             if not isinstance(wd, dict) or not wd:
                 continue
             stats["materiales_con_words"] += 1
-            oracion = AutocaptionExtractor._extraer_oracion(wd, mult)
+            # offset absoluto del segmento (en microsegundos, ya escalado);
+            # si no se encontro el segmento (material huerfano), offset=0
+            offset_us = offsets.get(material.get("id"), 0)
+            oracion = AutocaptionExtractor._extraer_oracion(wd, mult, offset_us)
             if oracion:
                 oraciones.append(oracion)
+        # ordenar por tiempo de inicio real: los materiales no necesariamente
+        # vienen en orden cronologico dentro de materials.texts
+        oraciones.sort(key=lambda o: o[0]["start_us"])
         return oraciones
 
     @staticmethod
-    def _extraer_oracion(words_data: Dict, mult: int) -> List[Dict]:
+    def _extraer_oracion(words_data: Dict, mult: int, offset_us: int = 0) -> List[Dict]:
         text_list = words_data.get("text", []) or []
         start_raw = words_data.get("start_time", []) or []
         end_raw = words_data.get("end_time", []) or []
@@ -146,7 +176,14 @@ class AutocaptionExtractor:
             end = int(end_raw[i]) * mult if i < len(end_raw) else 0
             if end <= start:
                 end = start + 100_000  # 100ms estimado
-            oracion.append({"word": palabra, "start_us": start, "end_us": end})
+            # CRITICO: start_time/end_time son relativos al inicio de la
+            # oracion; hay que sumar el offset absoluto del segmento en el
+            # timeline para no anclar todas las oraciones a 0.00s.
+            oracion.append({
+                "word": palabra,
+                "start_us": start + offset_us,
+                "end_us": end + offset_us,
+            })
         return oracion
 
 
