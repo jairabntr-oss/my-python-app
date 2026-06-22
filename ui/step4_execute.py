@@ -2,7 +2,6 @@
 Paso 4: Ejecución del pipeline completo.
 """
 
-import json
 import threading
 from pathlib import Path
 import customtkinter as ctk
