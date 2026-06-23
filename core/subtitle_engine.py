@@ -267,6 +267,19 @@ class SubtitleEngine:
                     # visible cuando arranca este -> heredar sus cajas para
                     # que el anti-colision no se solape con el
                     cajas_ocupadas = list(cajas_anterior)
+            # Índice liviano por banda vertical: mantiene el mismo criterio de
+            # colisión (min_dist_y=0.04) pero evita revisar TODAS las cajas en
+            # cada intento cuando hay muchos bloques/palabras.
+            min_dist_y = 0.04
+            bucket_y_size = min_dist_y
+
+            def _bucket_y(y_val: float) -> int:
+                return int(y_val // bucket_y_size)
+
+            cajas_por_bucket_y = {}
+            for caja in cajas_ocupadas:
+                by = _bucket_y(caja[1])
+                cajas_por_bucket_y.setdefault(by, []).append(caja)
             y_actual = y_zona_min + 0.08
 
             for i, palabra_data in enumerate(bloque["palabras"]):
@@ -357,7 +370,11 @@ class SubtitleEngine:
                 # agotaban los intentos sin destrabar la colision.
                 while intento < MAX_INTENTOS_COLISION:
                     choca = False
-                    for (cx, cy, cw) in cajas_ocupadas:
+                    bucket_actual = _bucket_y(y_actual)
+                    candidatos = []
+                    for by in (bucket_actual - 1, bucket_actual, bucket_actual + 1):
+                        candidatos.extend(cajas_por_bucket_y.get(by, []))
+                    for (cx, cy, cw) in candidatos:
                         distancia_x = abs(x - cx)
                         distancia_y = abs(y_actual - cy)
                         min_dist_x = (ancho_palabra + cw) / 2 + 0.02
@@ -366,7 +383,6 @@ class SubtitleEngine:
                         # Debe ser menor que PASO_Y_CORTO para no reempujar
                         # palabras que el avance normal ya separo bien. Si se
                         # cambia STYLE_SIZE, recalibrar este valor.
-                        min_dist_y = 0.04
 
                         if distancia_x < min_dist_x and distancia_y < min_dist_y:
                             choca = True
@@ -402,7 +418,9 @@ class SubtitleEngine:
                 # completo (o viceversa), vuelven a desalinearse posicion y
                 # tamano real, que es justo el bug que esto corrige.
                 posiciones[palabra_id] = (x, y_guardado, factor_reduccion)
-                cajas_ocupadas.append((x, y_guardado, ancho_palabra))
+                caja_nueva = (x, y_guardado, ancho_palabra)
+                cajas_ocupadas.append(caja_nueva)
+                cajas_por_bucket_y.setdefault(_bucket_y(y_guardado), []).append(caja_nueva)
 
                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
                 y_actual += paso
