@@ -1,0 +1,163 @@
+diff --git a/core/draft_manager.py b/core/draft_manager.py
+index 513d891..d976a21 100644
+--- a/core/draft_manager.py
++++ b/core/draft_manager.py
+@@ -63,29 +63,37 @@ class DraftManager:
+         try: return json.loads(content_str)
+         except json.JSONDecodeError: return None
+ 
+-    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1):
++    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1, offset_us=0):
+         """Clasifica un material de texto en auto_sin_editar / auto_ya_estilado
+         / texto_manual.
+ 
+         Soporta DOS formatos de CapCut observados con datos reales:
+         - Formato viejo: 'words' vive DENTRO de content (JSON string), como
+           una lista de dicts {"text":..., "start_time"/"start_us":...} YA EN
+-          MICROSEGUNDOS (no necesita conversion).
++          MICROSEGUNDOS y YA ABSOLUTOS respecto al video completo (confirmado
++          con los datos reales de "entrv fede baic": start_us=32766666, el
++          segundo 32 del video). No necesitan offset ni conversion.
+         - Formato nuevo (CapCut 8.8+, confirmado con datos reales de
+           "mariaaa baic"): 'words' es un campo SEPARADO a nivel RAIZ del
+           material, como arrays paralelos {"start_time":[...], "end_time":
+-          [...], "text":[...]} en MILISEGUNDOS (no microsegundos), e incluye
+-          elementos de solo espacio (" ") como separadores entre palabras
+-          que hay que descartar. mult_tiempo_raiz convierte esos valores
+-          crudos a microsegundos (ver analyze(), que lo calcula UNA vez para
+-          todo el draft con utils.helpers.detectar_multiplicador_tiempo).
++          [...], "text":[...]} en MILISEGUNDOS y RELATIVOS al inicio del
++          SEGMENTO (no del video). Confirmado: el segmento de "la dueña..."
++          tiene target_timerange.start=1166666us mientras que su words
++          empieza en start_time=0 -- sin sumar el offset del segmento, TODAS
++          las oraciones del video quedarian con start_us cercano a 0,
++          aplastadas una encima de otra. offset_us (target_timerange.start
++          del segmento, en microsegundos) se suma DESPUES de aplicar
++          mult_tiempo_raiz. mult_tiempo_raiz convierte esos valores crudos a
++          microsegundos (ver analyze(), que lo calcula UNA vez para todo el
++          draft con utils.helpers.detectar_multiplicador_tiempo).
+         """
+         try:
+             content = self._parse_content(text_mat.get("content"))
+ 
+             palabras_con_timing = []
+ 
+-            # ── Formato nuevo: words a nivel raiz, arrays paralelos ────────
++            # ── Formato nuevo: words a nivel raiz, arrays paralelos,
++            #    RELATIVOS al segmento -> sumar offset_us ────────────────
+             words_raiz = text_mat.get("words")
+             if isinstance(words_raiz, dict) and words_raiz.get("text"):
+                 starts = words_raiz.get("start_time", []) or []
+@@ -98,8 +106,8 @@ class DraftManager:
+                     end_raw = ends[i] if i < len(ends) else 0
+                     palabras_con_timing.append({
+                         "word": palabra,
+-                        "start_us": int(start_raw) * mult_tiempo_raiz,
+-                        "end_us": int(end_raw) * mult_tiempo_raiz,
++                        "start_us": int(start_raw) * mult_tiempo_raiz + offset_us,
++                        "end_us": int(end_raw) * mult_tiempo_raiz + offset_us,
+                     })
+                 if palabras_con_timing:
+                     # recognize_task_id poblado = viene de reconocimiento de
+@@ -110,7 +118,7 @@ class DraftManager:
+                     return "auto_ya_estilado", palabras_con_timing
+ 
+             # ── Formato viejo: words dentro de content, lista de dicts,
+-            #    YA en microsegundos (start_us/end_us), sin multiplicador ──
++            #    YA en microsegundos Y YA ABSOLUTOS -- NO sumar offset ──
+             if content is not None:
+                 words = content.get("words", [])
+                 if words:
+@@ -246,7 +254,11 @@ class DraftManager:
+                         auto_ya_estilado.append([])
+                         continue
+                     
+-                    categoria, palabras = self._clasificar_material_texto(text_mat, mult_tiempo_raiz)
++                    categoria, palabras = self._clasificar_material_texto(
++                        text_mat,
++                        mult_tiempo_raiz,
++                        offset_us=int((seg.get("target_timerange") or {}).get("start", 0) or 0),
++                    )
+                     if categoria == "auto_sin_editar" and palabras:
+                         auto_sin_editar.append(palabras)
+                     elif categoria == "auto_ya_estilado":
+diff --git a/tests/test_draft_manager.py b/tests/test_draft_manager.py
+index a101fa0..e235a48 100644
+--- a/tests/test_draft_manager.py
++++ b/tests/test_draft_manager.py
+@@ -140,6 +140,75 @@ class TestDraftManagerFormatoNuevoMaria:
+         assert maria["start_us"] == 560_000
+         assert maria["end_us"] == 880_000
+ 
++    def test_offset_del_segmento_se_suma_en_formato_nuevo(self, tmp_path):
++        """Regresion: en el formato nuevo, 'words' es RELATIVO al inicio del
++        SEGMENTO (target_timerange.start), no del video. Confirmado con
++        datos reales de 'mariaaa baic': el segmento de 'la dueña...' tiene
++        target_timerange.start=1166666us, pero su words empieza en
++        start_time=0. Sin sumar ese offset, TODAS las oraciones del video
++        quedaban con start_us cercano a 0 -- aplastadas unas sobre otras en
++        el tiempo, lo que el motor de posicionamiento interpretaba como
++        'no hay solapamiento' (porque cada bloque se procesaba como si
++        ocurriera al principio del video) y producia un resultado donde el
++        orden temporal real se perdia por completo."""
++        material_2 = {
++            "id": "MAT2",
++            "type": "subtitle",
++            "recognize_task_id": "otro_task_id",
++            "content": json.dumps({"styles": [{"size": 30}]}),
++            "words": {
++                # mismos valores reales que "la dueña de todo esto no si",
++                # relativos al inicio del SEGMENTO (no del video)
++                "start_time": [0, 240, 560, 640, 760, 960, 1120],
++                "end_time": [200, 520, 640, 760, 960, 1120, 1280],
++                "text": ["la", "dueña", "de", "todo", "esto", "no", "sí"],
++            },
++        }
++        data = {
++            "duration": 83_500_000,
++            "materials": {"texts": [
++                {
++                    "id": "MAT1",
++                    "recognize_task_id": "6a38c77c39734201f0f5f244_8_0",
++                    "content": json.dumps({"styles": [{"size": 30}]}),
++                    "words": {
++                        "start_time": [0, 240, 560],
++                        "end_time": [240, 440, 880],
++                        "text": ["vos", "sos", "María"],
++                    },
++                },
++                material_2,
++            ]},
++            "tracks": [
++                {"type": "video", "name": "", "segments": []},
++                {
++                    "type": "text", "name": "",
++                    "segments": [
++                        # offset real del primer segmento: 400000us (0.4s)
++                        {"material_id": "MAT1", "target_timerange": {"start": 400000, "duration": 880000}},
++                        # offset real del segundo segmento: 1166666us (1.17s)
++                        {"material_id": "MAT2", "target_timerange": {"start": 1166666, "duration": 1033334}},
++                    ],
++                },
++            ],
++        }
++        draft_file = tmp_path / "draft_content.json"
++        draft_file.write_text(json.dumps(data), encoding="utf-8")
++
++        oraciones, stats = DraftManager.oraciones_desde_json(str(draft_file))
++        assert stats["oraciones"] == 2
++
++        # Oracion 1 ("vos sos María"): offset 400000 + tiempos relativos
++        assert oraciones[0][0]["start_us"] == 400_000  # "vos": 0 + 400000
++        assert oraciones[0][-1]["end_us"] == 1_280_000  # "María": 880000 + 400000
++
++        # Oracion 2 ("la dueña..."): offset 1166666 + tiempos relativos.
++        # ANTES del fix, esto daba start_us=0 (sin offset), aplastando la
++        # oracion al principio del video en vez de en su momento real (~1.17s).
++        assert oraciones[1][0]["start_us"] == 1_166_666  # "la": 0 + 1166666
++        # las dos oraciones ya NO empiezan ambas en (casi) el mismo punto
++        assert oraciones[1][0]["start_us"] != oraciones[0][0]["start_us"]
++
+     def test_sin_recognize_task_id_es_auto_ya_estilado_no_procesable(self, tmp_path):
+         """Si el material NO tiene recognize_task_id, no es auto-caption
+         nativo (podria ser texto ya editado a mano) -> no debe contarse

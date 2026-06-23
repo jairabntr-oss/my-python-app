@@ -63,29 +63,37 @@ class DraftManager:
         try: return json.loads(content_str)
         except json.JSONDecodeError: return None
 
-    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1):
+    def _clasificar_material_texto(self, text_mat, mult_tiempo_raiz=1, offset_us=0):
         """Clasifica un material de texto en auto_sin_editar / auto_ya_estilado
         / texto_manual.
 
         Soporta DOS formatos de CapCut observados con datos reales:
         - Formato viejo: 'words' vive DENTRO de content (JSON string), como
           una lista de dicts {"text":..., "start_time"/"start_us":...} YA EN
-          MICROSEGUNDOS (no necesita conversion).
+          MICROSEGUNDOS y YA ABSOLUTOS respecto al video completo (confirmado
+          con los datos reales de "entrv fede baic": start_us=32766666, el
+          segundo 32 del video). No necesitan offset ni conversion.
         - Formato nuevo (CapCut 8.8+, confirmado con datos reales de
           "mariaaa baic"): 'words' es un campo SEPARADO a nivel RAIZ del
           material, como arrays paralelos {"start_time":[...], "end_time":
-          [...], "text":[...]} en MILISEGUNDOS (no microsegundos), e incluye
-          elementos de solo espacio (" ") como separadores entre palabras
-          que hay que descartar. mult_tiempo_raiz convierte esos valores
-          crudos a microsegundos (ver analyze(), que lo calcula UNA vez para
-          todo el draft con utils.helpers.detectar_multiplicador_tiempo).
+          [...], "text":[...]} en MILISEGUNDOS y RELATIVOS al inicio del
+          SEGMENTO (no del video). Confirmado: el segmento de "la dueña..."
+          tiene target_timerange.start=1166666us mientras que su words
+          empieza en start_time=0 -- sin sumar el offset del segmento, TODAS
+          las oraciones del video quedarian con start_us cercano a 0,
+          aplastadas una encima de otra. offset_us (target_timerange.start
+          del segmento, en microsegundos) se suma DESPUES de aplicar
+          mult_tiempo_raiz. mult_tiempo_raiz convierte esos valores crudos a
+          microsegundos (ver analyze(), que lo calcula UNA vez para todo el
+          draft con utils.helpers.detectar_multiplicador_tiempo).
         """
         try:
             content = self._parse_content(text_mat.get("content"))
 
             palabras_con_timing = []
 
-            # ── Formato nuevo: words a nivel raiz, arrays paralelos ────────
+            # ── Formato nuevo: words a nivel raiz, arrays paralelos,
+            #    RELATIVOS al segmento -> sumar offset_us ────────────────
             words_raiz = text_mat.get("words")
             if isinstance(words_raiz, dict) and words_raiz.get("text"):
                 starts = words_raiz.get("start_time", []) or []
@@ -98,8 +106,8 @@ class DraftManager:
                     end_raw = ends[i] if i < len(ends) else 0
                     palabras_con_timing.append({
                         "word": palabra,
-                        "start_us": int(start_raw) * mult_tiempo_raiz,
-                        "end_us": int(end_raw) * mult_tiempo_raiz,
+                        "start_us": int(start_raw) * mult_tiempo_raiz + offset_us,
+                        "end_us": int(end_raw) * mult_tiempo_raiz + offset_us,
                     })
                 if palabras_con_timing:
                     # recognize_task_id poblado = viene de reconocimiento de
@@ -110,7 +118,7 @@ class DraftManager:
                     return "auto_ya_estilado", palabras_con_timing
 
             # ── Formato viejo: words dentro de content, lista de dicts,
-            #    YA en microsegundos (start_us/end_us), sin multiplicador ──
+            #    YA en microsegundos Y YA ABSOLUTOS -- NO sumar offset ──
             if content is not None:
                 words = content.get("words", [])
                 if words:
@@ -246,7 +254,11 @@ class DraftManager:
                         auto_ya_estilado.append([])
                         continue
                     
-                    categoria, palabras = self._clasificar_material_texto(text_mat, mult_tiempo_raiz)
+                    categoria, palabras = self._clasificar_material_texto(
+                        text_mat,
+                        mult_tiempo_raiz,
+                        offset_us=int((seg.get("target_timerange") or {}).get("start", 0) or 0),
+                    )
                     if categoria == "auto_sin_editar" and palabras:
                         auto_sin_editar.append(palabras)
                     elif categoria == "auto_ya_estilado":
