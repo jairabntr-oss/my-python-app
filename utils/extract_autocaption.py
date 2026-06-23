@@ -18,7 +18,7 @@ Ahora hay UNA sola fuente de verdad:
 import json
 import sys
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 from core.draft_manager import DraftManager
 from utils.helpers import detectar_multiplicador_tiempo
@@ -104,13 +104,23 @@ class AutocaptionExtractor:
         duration_us = int(draft.get("duration", 0) or 0)
         offsets = AutocaptionExtractor._offsets_por_material(draft)
 
-        # relevar maximo crudo y duraciones de palabra para detectar la unidad
+        # Indexado upfront de materiales + relevar maximo crudo y duraciones
+        # en una sola pasada, para evitar búsquedas lineales repetidas.
+        materiales_index = {}
+        entradas_con_words = []
         max_raw = 0
         duraciones = []
-        for material in materials_texts:
+        for idx, material in enumerate(materials_texts):
+            material_id = material.get("id")
+            if material_id is None:
+                material_id = f"__idx_{idx}"
+            materiales_index[material_id] = material
+
             wd = material.get("words", {})
             if not isinstance(wd, dict):
                 continue
+            entradas_con_words.append((material_id, wd))
+
             starts = wd.get("start_time", []) or []
             ends = wd.get("end_time", []) or []
             for v in ends or starts:
@@ -132,11 +142,11 @@ class AutocaptionExtractor:
         mult = AutocaptionExtractor._detectar_multiplicador(median_dur, max_raw, duration_us)
 
         oraciones = []
-        for material in materials_texts:
-            wd = material.get("words", {})
-            if not isinstance(wd, dict) or not wd:
+        for material_id, wd in entradas_con_words:
+            if not wd:
                 continue
             stats["materiales_con_words"] += 1
+            material = materiales_index[material_id]
             # offset absoluto del segmento (en microsegundos, ya escalado);
             # si no se encontro el segmento (material huerfano), offset=0
             offset_us = offsets.get(material.get("id"), 0)

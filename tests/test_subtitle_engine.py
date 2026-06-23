@@ -5,6 +5,9 @@ Validamos que los errores del handoff estén resueltos.
 """
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
 from core.subtitle_engine import SubtitleEngine
 
 
@@ -221,6 +224,54 @@ class TestDistribucionGreedy(unittest.TestCase):
             tracks[assigned].append((seg_start, seg_end))
 
         return len(tracks)
+
+
+class TestInyeccionEstiloAvanzado(unittest.TestCase):
+    def test_parchea_solo_materiales_generados(self):
+        with tempfile.TemporaryDirectory() as td:
+            draft_path = Path(td) / "draft_content.json"
+            draft_data = {
+                "materials": {
+                    "texts": [
+                        {
+                            "id": "MAT_1",
+                            "content": json.dumps({"styles": [{}]}),
+                        },
+                        {
+                            "id": "MAT_2",
+                            "content": json.dumps({"styles": [{}]}),
+                        },
+                    ]
+                }
+            }
+            draft_path.write_text(json.dumps(draft_data), encoding="utf-8")
+
+            engine = SubtitleEngine.__new__(SubtitleEngine)
+            engine.script = type("Script", (), {"save_path": str(draft_path)})()
+            engine._material_ids_generados = ["MAT_1"]
+            engine.profile = {
+                "shadow_enabled": True,
+                "shadow_color": "#000000",
+                "shadow_alpha": 0.33,
+                "shadow_distance": 17.0,
+                "shadow_angle": -115.9,
+                "shadow_smoothing": 0.45,
+                "font_path": "/fonts/Poppins-Bold.ttf",
+                "font_name": "Poppins Bold",
+                "font_id": "FONT1",
+                "bold": True,
+                "text_size": 30,
+            }
+
+            patched = engine._inyectar_estilo_avanzado()
+            self.assertEqual(patched, 1)
+
+            out = json.loads(draft_path.read_text(encoding="utf-8"))
+            mats = {m["id"]: m for m in out["materials"]["texts"]}
+            self.assertEqual(mats["MAT_1"]["text_size"], 30.0)
+            self.assertNotIn("text_size", mats["MAT_2"])
+            style_font = json.loads(mats["MAT_1"]["content"])["styles"][0]["font"]
+            self.assertEqual(style_font["path"], "/fonts/Poppins-Bold.ttf")
 
 
 if __name__ == "__main__":
