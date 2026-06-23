@@ -35,8 +35,15 @@ class TestPalabrasLargasNoColapsanEnElMismoPunto(unittest.TestCase):
         self.engine.ancho_por_caracter = 0.15
 
     def test_palabras_largas_alternadas_no_son_todas_iguales(self):
-        # Una sola oración con varias palabras largas (>=8 letras), que es
-        # justo el caso que colapsaba antes del fix.
+        # Una sola oración con varias palabras largas (>=8 letras).
+        #
+        # NOTA: con el fix de "radio seguro" (ver _calcular_posiciones), las
+        # palabras largas ahora se CENTRAN a propósito en x=0 -- es
+        # intencional, no el bug original. Centrarlas evita que invadan la
+        # columna opuesta en diálogo simultáneo (confirmado con un caso
+        # real: "reservamos" sin centrar invadía la columna en -0.20).
+        # Lo que sigue siendo un invariante real es que, al compartir todas
+        # la misma columna X, deben separarse en Y para no apilarse.
         oracion = [
             {"word": "camioneta", "start_us": 0, "end_us": 300_000},
             {"word": "tecnologia", "start_us": 300_000, "end_us": 600_000},
@@ -45,23 +52,28 @@ class TestPalabrasLargasNoColapsanEnElMismoPunto(unittest.TestCase):
         bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
         posiciones = self.engine._calcular_posiciones(bloques, [])
 
-        xs = [posiciones[f"0_0_{i}"][0] for i in range(len(oracion))]
-        # No deben ser TODAS exactamente el mismo valor (el bug original).
-        self.assertNotEqual(
-            len(set(xs)), 1,
-            f"Todas las palabras largas cayeron en el mismo X: {xs}",
+        ys = [round(posiciones[f"0_0_{i}"][1], 4) for i in range(len(oracion))]
+        self.assertEqual(
+            len(set(ys)), len(oracion),
+            f"Palabras largas en la misma columna deben separarse en Y: {ys}",
         )
 
     def test_clamp_de_x_nunca_se_invierte_con_palabra_muy_larga(self):
         """Con una palabra absurdamente larga, el código no debe reventar ni
-        devolver un valor fuera de [-0.45, 0.45]; debe caer a 0.0 (centro)."""
+        devolver un valor fuera de [-0.45, 0.45]. Con el factor de reduccion
+        dinamico (ver _calcular_posiciones), una palabra muy larga se achica
+        lo suficiente para entrar en rango en vez de requerir el caso
+        especial de "centrar en 0"; lo que importa es que el resultado
+        siempre quede dentro de pantalla y con un factor de reduccion < 1."""
         oracion = [
             {"word": "x" * 30, "start_us": 0, "end_us": 300_000},
         ]
         bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
         posiciones = self.engine._calcular_posiciones(bloques, [])
-        x, _y = posiciones["0_0_0"]
-        self.assertEqual(x, 0.0)
+        x, _y, factor = posiciones["0_0_0"]
+        self.assertGreaterEqual(x, -0.45)
+        self.assertLessEqual(x, 0.45)
+        self.assertLess(factor, 1.0, "una palabra de 30 letras debe reducirse")
 
 
 class TestBloqueDensoNoAplastaTodoEnLaMismaY(unittest.TestCase):
@@ -144,9 +156,9 @@ class TestNoHayDosPalabrasSimultaneasEnLaMismaPosicion(unittest.TestCase):
         # por debajo del espaciado normal de linea (0.05) y del min_dist_y
         # (0.04), asi que solo detecta superposicion real (mismo punto), no
         # el apilado normal del estilo karaoke.
-        pos_o1 = [posiciones[f"0_0_{i}"] for i in range(3)]
+        pos_o1 = [(posiciones[f"0_0_{i}"][0], posiciones[f"0_0_{i}"][1]) for i in range(3)]
         for j in range(5):
-            x2, y2 = posiciones[f"1_1_{j}"]
+            x2, y2, _factor2 = posiciones[f"1_1_{j}"]
             for (x1, y1) in pos_o1:
                 mismo_punto = abs(x1 - x2) < 0.03 and abs(y1 - y2) < 0.03
                 self.assertFalse(
@@ -154,3 +166,85 @@ class TestNoHayDosPalabrasSimultaneasEnLaMismaPosicion(unittest.TestCase):
                     f"Palabra de oración 2 en ({x2:.2f},{y2:.2f}) cae en el "
                     f"mismo punto que una de oración 1 en ({x1:.2f},{y1:.2f})",
                 )
+
+
+class TestPalabraLargaNoInvadeColumnaOpuestaEnOverlap(unittest.TestCase):
+    """Regresión del caso real visto en captura de 'mariaaa baic':
+    'reservamos' (10 letras) simultánea con 'lo que te' (oración de
+    diálogo cruzado) quedaba tapando ambas columnas (-0.20 y +0.20),
+    haciendo el texto ilegible. Confirmado matemáticamente: sin reducción,
+    'reservamos' con ancho_por_caracter=0.15 mide 0.75 de radio, mas ancho
+    que TODA la pantalla visible (-0.45 a 0.45)."""
+
+    def setUp(self):
+        self.engine = SubtitleEngine.__new__(SubtitleEngine)
+        self.engine.max_palabras_por_bloque = 5
+        self.engine.ancla_izquierda = -0.20
+        self.engine.ancla_derecha = 0.20
+        self.engine.ancho_por_caracter = 0.15
+
+    def test_reservamos_no_invade_ninguna_columna(self):
+        oracion1 = [{"word": "reservamos", "start_us": 45033333, "end_us": 45700000}]
+        oracion2 = [
+            {"word": "lo", "start_us": 44900000, "end_us": 45100000},
+            {"word": "que", "start_us": 44766666, "end_us": 44966666},
+            {"word": "sí", "start_us": 44933333, "end_us": 45133333},
+            {"word": "te", "start_us": 44833333, "end_us": 45033333},
+        ]
+        bloques = [
+            {"idx_oracion": 0, "palabras": oracion1, "es_overlap": False},
+            {"idx_oracion": 1, "palabras": oracion2, "es_overlap": False},
+        ]
+        posiciones = self.engine._calcular_posiciones(bloques, [])
+        x, _y, factor = posiciones["0_0_0"]
+
+        ancho_base = (len("reservamos") * self.engine.ancho_por_caracter) / 2
+        ancho_real = ancho_base * factor
+
+        self.assertGreater(x - ancho_real, -0.20, "invade la columna izquierda")
+        self.assertLess(x + ancho_real, 0.20, "invade la columna derecha")
+
+
+class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
+    """Pedido del usuario tras ver su estilo manual de referencia (imagen
+    real: "de" / "7 años" en lineas consecutivas de la misma columna no
+    compartian el mismo eje vertical -> se veian "torcidas"). Ahora las
+    palabras de una misma columna deben compartir el mismo BORDE IZQUIERDO
+    (columna par) o BORDE DERECHO (columna impar), no el mismo centro fijo.
+    """
+
+    def setUp(self):
+        self.engine = SubtitleEngine.__new__(SubtitleEngine)
+        self.engine.max_palabras_por_bloque = 5
+        self.engine.ancla_izquierda = -0.20
+        self.engine.ancla_derecha = 0.20
+        self.engine.ancho_por_caracter = 0.15
+
+    def test_palabras_corta_y_larga_en_misma_columna_comparten_borde(self):
+        # "de" (2 letras, corta) y "transferible"-like word en la misma
+        # columna (ambas en posicion par, i=0 y i=2) deben alinear su
+        # borde izquierdo, no su centro.
+        oracion = [
+            {"word": "de", "start_us": 0, "end_us": 100_000},
+            {"word": "siete", "start_us": 100_000, "end_us": 200_000},
+            {"word": "anios", "start_us": 200_000, "end_us": 300_000},
+        ]
+        bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
+        posiciones = self.engine._calcular_posiciones(bloques, [])
+
+        ancho_por_caracter = self.engine.ancho_por_caracter
+        # "de" (i=0, columna izquierda) y "anios" (i=2, columna izquierda)
+        x_de, _, _ = posiciones["0_0_0"]
+        x_anios, _, _ = posiciones["0_0_2"]
+
+        ancho_de = (len("de") * ancho_por_caracter) / 2
+        ancho_anios = (len("anios") * ancho_por_caracter) / 2
+
+        borde_de = x_de - ancho_de
+        borde_anios = x_anios - ancho_anios
+
+        self.assertAlmostEqual(
+            borde_de, borde_anios, places=4,
+            msg=f"'de' (borde={borde_de:.3f}) y 'anios' (borde={borde_anios:.3f}) "
+                f"no comparten el mismo borde izquierdo",
+        )

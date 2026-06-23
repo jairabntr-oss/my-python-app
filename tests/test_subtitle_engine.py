@@ -92,6 +92,12 @@ class TestLayoutConfig(unittest.TestCase):
     """Tests para layout configurable de posiciones."""
 
     def test_anclas_configurables_se_aplican_en_posiciones(self):
+        """Las anclas representan el BORDE de alineacion (pedido del
+        usuario: palabras de una misma columna deben compartir el mismo
+        borde izquierdo/derecho, no el mismo centro fijo -- antes una
+        palabra corta y una larga centradas en el mismo punto arrancaban en
+        bordes distintos, viendose "torcidas"). El centro real que CapCut
+        necesita se deriva sumando/restando medio ancho de la palabra."""
         engine = SubtitleEngine(
             script=None,
             profile={"ancla_izquierda": -0.1, "ancla_derecha": 0.3, "ancho_por_caracter": 0.05},
@@ -105,8 +111,14 @@ class TestLayoutConfig(unittest.TestCase):
         ]
 
         posiciones = engine._calcular_posiciones(bloques, pares_overlap=[])
-        # el id ahora incluye indice de bloque: "{b_idx}_{idx_oracion}_{i}"
-        self.assertEqual(posiciones["0_0_0"][0], -0.1)
+        # "hola": 4 letras, ancho_por_caracter=0.05 -> ancho_palabra=0.10.
+        # Columna izquierda (i=0): borde_izquierdo=-0.1 -> centro = borde +
+        # ancho_palabra = -0.1 + 0.10 = 0.0. El BORDE real (centro -
+        # ancho_palabra) debe coincidir con la ancla configurada.
+        x, _y, _factor = posiciones["0_0_0"]
+        ancho_palabra = (len("hola") * 0.05) / 2
+        borde_izquierdo_real = x - ancho_palabra
+        self.assertAlmostEqual(borde_izquierdo_real, -0.1)
 
 
 class TestSeSolapa(unittest.TestCase):

@@ -45,8 +45,8 @@ class SubtitleEngine:
     # estos pasos y min_dist_y, porque dependen del alto REAL del texto en
     # pantalla (el bug de "mariaaa baic" fue justamente size=30 -> texto 3x
     # mas grande -> desbordaba este espaciado y se amontonaba).
-    PASO_Y_CORTO = 0.05   # Palabras 1-3 letras
-    PASO_Y_LARGO = 0.10   # Palabras 8+ letras
+    PASO_Y_CORTO = 0.045   # Palabras 1-3 letras (pedido: "achicar distancia entre lineas")
+    PASO_Y_LARGO = 0.09    # Palabras 8+ letras
 
     # Prefijo de los tracks de subtitulos (se crean varios para no solapar
     # en el tiempo: equivalente a los AUTO_pos_N del sistema original)
@@ -285,10 +285,59 @@ class SubtitleEngine:
 
                 ancla_izquierda = getattr(self, "ancla_izquierda", self.ANCLA_IZQUIERDA)
                 ancla_derecha = getattr(self, "ancla_derecha", self.ANCLA_DERECHA)
-                x = ancla_izquierda if i % 2 == 0 else ancla_derecha
 
                 if len(palabra) >= 8:
-                    x *= 0.5
+                    x = ancla_izquierda if i % 2 == 0 else ancla_derecha
+                else:
+                    # Alineado por BORDE IZQUIERDO (como un margen de
+                    # parrafo), no por centro fijo. Pedido explicito del
+                    # usuario tras ver su estilo manual de referencia: "de"
+                    # y "7 años" en lineas consecutivas de la misma columna
+                    # no compartian el mismo eje porque antes se centraba
+                    # cada palabra en la MISMA x sin importar su ancho (una
+                    # palabra corta y una larga centradas en el mismo punto
+                    # arrancan en bordes distintos). Ahora ancla_izquierda /
+                    # ancla_derecha representan el BORDE, y el centro real
+                    # que CapCut necesita se calcula sumando medio ancho.
+                    borde = ancla_izquierda if i % 2 == 0 else ancla_derecha
+                    if i % 2 == 0:
+                        x = borde + ancho_palabra  # borde + (2*ancho_palabra)/2
+                    else:
+                        # columna derecha: el "borde" alineado es el DERECHO,
+                        # para que el efecto de columna sea simetrico
+                        x = borde - ancho_palabra
+
+                # RADIO_SEGURO_PALABRA_LARGA: con las columnas en ±0.20, una
+                # palabra larga centrada no debe medir mas de ~0.18 de radio
+                # o invade la columna opuesta aunque este perfectamente
+                # centrada (confirmado con un draft real: "reservamos", 10
+                # letras, con ancho_por_caracter=0.15 normal mide 0.75 de
+                # radio -- mas ancho que TODA la pantalla). Un factor de
+                # reduccion FIJO no sirve porque palabras de distinta
+                # longitud necesitan distinto factor (8 letras necesita
+                # ~0.30, 10 letras necesita ~0.24); en vez de eso, se
+                # calcula el factor que hace falta para CADA palabra.
+                if len(palabra) >= 8:
+                    # RADIO_SEGURO levemente mas chico que antes (0.16 vs
+                    # 0.18) -- pedido del usuario de "achicar un poco las
+                    # palabras grandes sin perder legibilidad", aplicado aca
+                    # como mas margen de seguridad contra las columnas en
+                    # ±0.20 en vez de un numero de tamano de fuente fijo.
+                    RADIO_SEGURO = 0.16
+                    factor_reduccion = min(1.0, RADIO_SEGURO / ancho_palabra) if ancho_palabra > 0 else 1.0
+                    ancho_palabra *= factor_reduccion
+                    # Centrar en x=0 (no en la mitad de la ancla): el
+                    # RADIO_SEGURO ya esta calculado para que, centrada en 0,
+                    # la palabra no llegue a las columnas en ±0.20. Si en vez
+                    # de centrar se deja a mitad de camino hacia la ancla
+                    # (x=±0.10, lo que hacia "x *= 0.5"), el radio seguro de
+                    # un lado deja de ser simetrico y la palabra puede seguir
+                    # invadiendo la columna del lado hacia el que se desvio
+                    # (confirmado con un caso real: x=-0.10 + radio 0.18
+                    # llegaba a -0.28, pisando la columna izquierda en -0.20).
+                    x = 0.0
+                else:
+                    factor_reduccion = 1.0
 
                 x_lo = -0.45 + ancho_palabra / 2
                 x_hi = 0.45 - ancho_palabra / 2
@@ -346,7 +395,13 @@ class SubtitleEngine:
                     y_zona_min - margen_extra,
                     min(y_zona_max + margen_extra, y_actual),
                 )
-                posiciones[palabra_id] = (x, y_guardado)
+                # Se guarda el factor_reduccion junto con la posicion para
+                # que _crear_segmentos use el MISMO factor al elegir el
+                # tamano de fuente real -- si el calculo de ancho/colision
+                # asume una palabra mas chica pero el render usa el tamano
+                # completo (o viceversa), vuelven a desalinearse posicion y
+                # tamano real, que es justo el bug que esto corrige.
+                posiciones[palabra_id] = (x, y_guardado, factor_reduccion)
                 cajas_ocupadas.append((x, y_guardado, ancho_palabra))
 
                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
@@ -500,9 +555,28 @@ class SubtitleEngine:
             size=style_size, align=1, color=color_rgb, bold=bold,
             auto_wrapping=True,  # hace que pycapcut guarde type:"subtitle"
         )
+        # Cache de estilos reducidos por factor: _calcular_posiciones ya
+        # decidio, palabra por palabra, el factor_reduccion exacto que hace
+        # falta para que su ancho real no invada la columna opuesta (ver esa
+        # funcion para el detalle). Aca se construye el TextStyle a juego con
+        # ESE mismo factor en vez de un valor fijo, para que tamano visual y
+        # ancho usado en el calculo de posicion/colision sean siempre
+        # consistentes entre si.
+        _cache_estilos_reducidos: Dict[float, "cc.TextStyle"] = {}
+
+        def _estilo_para_factor(factor: float):
+            if factor >= 0.999:
+                return estilo
+            factor_r = round(factor, 3)
+            if factor_r not in _cache_estilos_reducidos:
+                _cache_estilos_reducidos[factor_r] = cc.TextStyle(
+                    size=style_size * factor_r, align=1, color=color_rgb,
+                    bold=bold, auto_wrapping=True,
+                )
+            return _cache_estilos_reducidos[factor_r]
 
         # 1) construir todos los segmentos con timing ACUMULATIVO
-        items = []  # (start_us, end_us, palabra, x, y)
+        items = []  # (start_us, end_us, palabra, x, y, factor_reduccion)
         for b_idx, bloque in enumerate(bloques):
             palabras = bloque["palabras"]
             if not palabras:
@@ -513,8 +587,11 @@ class SubtitleEngine:
                 start_us = int(palabra_data["start_us"])
                 end_us = max(block_end, start_us + 1_000)  # acumulativo
                 palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
-                x, y = posiciones.get(palabra_id, (0.0, 0.0))
-                items.append((start_us, end_us, palabra_data["word"], x, y))
+                pos = posiciones.get(palabra_id, (0.0, 0.0, 1.0))
+                # compat: tuplas viejas de 2 elementos (sin factor) -> 1.0
+                x, y = pos[0], pos[1]
+                factor = pos[2] if len(pos) > 2 else 1.0
+                items.append((start_us, end_us, palabra_data["word"], x, y, factor))
 
         # 2) reparto greedy en tracks (cada item al primer track libre)
         items.sort(key=lambda t: t[0])
@@ -541,14 +618,15 @@ class SubtitleEngine:
         # 4) crear y agregar los segmentos
         total_palabras = 0
         material_ids_creados = []
-        for (start_us, end_us, palabra, x, y), ti in zip(items, asignacion):
+        for (start_us, end_us, palabra, x, y, factor), ti in zip(items, asignacion):
             clip = cc.ClipSettings(
                 scale_x=scale, scale_y=scale_y, transform_x=x, transform_y=y,
             )
+            estilo_palabra = _estilo_para_factor(factor)
             segmento = cc.TextSegment(
                 text=palabra,
                 timerange=cc.Timerange(start_us, end_us - start_us),
-                style=estilo,
+                style=estilo_palabra,
                 clip_settings=clip,
             )
             self.script.add_segment(segmento, f"{self.TRACK_PREFIX}{ti}")
