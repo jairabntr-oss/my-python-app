@@ -16,7 +16,7 @@ Resuelve errores del handoff:
 """
 
 import json
-from typing import List, Tuple, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 try:
     import pycapcut as cc
@@ -24,6 +24,8 @@ try:
 except ImportError:
     cc = None  # type: ignore[assignment]
     _PYCAPCUT_AVAILABLE = False
+
+from core.json_patcher import patch_materials_batch
 
 
 class SubtitleEngine:
@@ -235,6 +237,28 @@ class SubtitleEngine:
         - Espaciado vertical variable según largo de palabra
         """
         posiciones = {}  # palabra_id → (x, y)
+        grid_size = 10
+        cell_size = 1.0 / grid_size
+        min_dist_y = 0.04
+        margen_x = 0.02
+
+        def _to_cell_index(valor: float) -> int:
+            idx = int((valor + 0.5) / cell_size)
+            return max(0, min(grid_size - 1, idx))
+
+        def _iter_cells(
+            x_min: float, x_max: float, y_min: float, y_max: float
+        ) -> List[Tuple[int, int]]:
+            ix_min = _to_cell_index(x_min)
+            ix_max = _to_cell_index(x_max)
+            iy_min = _to_cell_index(y_min)
+            iy_max = _to_cell_index(y_max)
+            return [
+                (ix, iy)
+                for ix in range(ix_min, ix_max + 1)
+                for iy in range(iy_min, iy_max + 1)
+            ]
+
         # cajas del ULTIMO bloque generado en cada zona de pantalla ("normal",
         # "arriba", "abajo"), junto con hasta cuando siguen visibles. Sirve
         # para no colocar el bloque siguiente encima si todavia se solapan
@@ -259,6 +283,24 @@ class SubtitleEngine:
             fin_visible_bloque = int(palabras_bloque[-1]["end_us"]) if palabras_bloque else 0
 
             cajas_ocupadas = []
+            grid_cajas: Dict[Tuple[int, int], Set[int]] = {}
+
+            def _registrar_caja(idx_caja: int, cx: float, cy: float, cw: float) -> None:
+                ex = cw / 2 + margen_x
+                ey = min_dist_y
+                for cell in _iter_cells(cx - ex, cx + ex, cy - ey, cy + ey):
+                    grid_cajas.setdefault(cell, set()).add(idx_caja)
+
+            def _cajas_cercanas(
+                cx: float, cy: float, cw: float
+            ) -> List[Tuple[float, float, float]]:
+                ex = cw / 2 + margen_x
+                ey = min_dist_y
+                idxs = set()
+                for cell in _iter_cells(cx - ex, cx + ex, cy - ey, cy + ey):
+                    idxs.update(grid_cajas.get(cell, set()))
+                return [cajas_ocupadas[idx] for idx in idxs]
+
             anterior = ultimo_bloque_por_zona.get(zona)
             if anterior is not None:
                 fin_anterior, cajas_anterior = anterior
@@ -267,6 +309,8 @@ class SubtitleEngine:
                     # visible cuando arranca este -> heredar sus cajas para
                     # que el anti-colision no se solape con el
                     cajas_ocupadas = list(cajas_anterior)
+                    for idx_caja, (cx, cy, cw) in enumerate(cajas_ocupadas):
+                        _registrar_caja(idx_caja, cx, cy, cw)
             y_actual = y_zona_min + 0.08
 
             for i, palabra_data in enumerate(bloque["palabras"]):
@@ -387,16 +431,15 @@ class SubtitleEngine:
                 # agotaban los intentos sin destrabar la colision.
                 while intento < MAX_INTENTOS_COLISION:
                     choca = False
-                    for (cx, cy, cw) in cajas_ocupadas:
+                    for (cx, cy, cw) in _cajas_cercanas(x, y_actual, ancho_palabra):
                         distancia_x = abs(x - cx)
                         distancia_y = abs(y_actual - cy)
-                        min_dist_x = (ancho_palabra + cw) / 2 + 0.02
+                        min_dist_x = (ancho_palabra + cw) / 2 + margen_x
                         # min_dist_y calibrado para STYLE_SIZE=10 + scale
                         # ~3.037 (config validada en "entrv fede baic").
                         # Debe ser menor que PASO_Y_CORTO para no reempujar
                         # palabras que el avance normal ya separo bien. Si se
                         # cambia STYLE_SIZE, recalibrar este valor.
-                        min_dist_y = 0.04
 
                         if distancia_x < min_dist_x and distancia_y < min_dist_y:
                             choca = True
@@ -433,6 +476,7 @@ class SubtitleEngine:
                 # tamano real, que es justo el bug que esto corrige.
                 posiciones[palabra_id] = (x, y_guardado, factor_reduccion)
                 cajas_ocupadas.append((x, y_guardado, ancho_palabra))
+                _registrar_caja(len(cajas_ocupadas) - 1, x, y_guardado, ancho_palabra)
 
                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
                 y_actual += paso
@@ -473,9 +517,6 @@ class SubtitleEngine:
         if not save_path:
             return 0
 
-        with open(save_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
         shadow_enabled = self.profile.get("shadow_enabled", True)
         shadow_color = self.profile.get("shadow_color", "#000000")
         shadow_alpha = float(self.profile.get("shadow_alpha", 0.33))
@@ -488,61 +529,55 @@ class SubtitleEngine:
         bold = bool(self.profile.get("bold", True))
         text_size = float(self.profile.get("text_size", 30))
 
-        n = 0
-        for mat in data.get("materials", {}).get("texts", []) or []:
-            if mat.get("id") not in ids:
-                continue
+        updates = {
+            "text_size": text_size,
+        }
+        if shadow_enabled:
+            updates.update(
+                {
+                    "has_shadow": True,
+                    "shadow_color": shadow_color,
+                    "shadow_alpha": shadow_alpha,
+                    "shadow_distance": shadow_distance,
+                    "shadow_angle": shadow_angle,
+                    "shadow_smoothing": shadow_smoothing,
+                }
+            )
+        if font_path:
+            updates["font_path"] = font_path
+        if font_name:
+            updates["font_name"] = font_name
 
-            # text_size a nivel raiz (distinto del 'size' interno en content.styles)
-            mat["text_size"] = text_size
+        # CRITICO: ademas de font_path/font_name a nivel RAIZ, CapCut
+        # renderiza el texto usando content.styles[N].font. Si ese campo
+        # queda en None, CapCut ignora el font_path de la raiz y cae a la
+        # fuente del SISTEMA (texto fino/generico, no Poppins-Bold).
+        # Confirmado con draft real de "mariaaa baic": styles[0].font era
+        # None y el texto se veia con fuente del sistema. Hay que inyectar
+        # font (con path/id) dentro de CADA style del content.
+        if font_path:
+            font_obj = {"id": font_id or "", "path": font_path}
 
-            if shadow_enabled:
-                mat["has_shadow"] = True
-                mat["shadow_color"] = shadow_color
-                mat["shadow_alpha"] = shadow_alpha
-                mat["shadow_distance"] = shadow_distance
-                mat["shadow_angle"] = shadow_angle
-                mat["shadow_smoothing"] = shadow_smoothing
+            def _patch_content(content_raw, _material):
+                if not isinstance(content_raw, str):
+                    return content_raw
+                try:
+                    content_obj = json.loads(content_raw)
+                except Exception:
+                    return content_raw
+                if not isinstance(content_obj, dict) or not content_obj.get("styles"):
+                    return content_raw
+                for st in content_obj["styles"]:
+                    if isinstance(st, dict):
+                        st["font"] = font_obj
+                        if bold:
+                            st["bold"] = True
+                return json.dumps(content_obj, ensure_ascii=False)
 
-            if font_path:
-                mat["font_path"] = font_path
-            if font_name:
-                mat["font_name"] = font_name
+            updates["content"] = _patch_content
 
-            # CRITICO: ademas de font_path/font_name a nivel RAIZ, CapCut
-            # renderiza el texto usando content.styles[N].font. Si ese campo
-            # queda en None, CapCut ignora el font_path de la raiz y cae a la
-            # fuente del SISTEMA (texto fino/generico, no Poppins-Bold).
-            # Confirmado con draft real de "mariaaa baic": styles[0].font era
-            # None y el texto se veia con fuente del sistema. Hay que inyectar
-            # font (con path/id) dentro de CADA style del content.
-            if font_path:
-                content_raw = mat.get("content")
-                if isinstance(content_raw, str):
-                    try:
-                        content_obj = json.loads(content_raw)
-                    except Exception:
-                        content_obj = None
-                    if isinstance(content_obj, dict) and content_obj.get("styles"):
-                        font_obj = {
-                            "id": font_id or "",
-                            "path": font_path,
-                        }
-                        for st in content_obj["styles"]:
-                            if isinstance(st, dict):
-                                st["font"] = font_obj
-                                # asegurar negrita real (Poppins-BOLD)
-                                if bold:
-                                    st["bold"] = True
-                        mat["content"] = json.dumps(content_obj, ensure_ascii=False)
-
-            n += 1
-
-        if n:
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-
-        return n
+        patches = [(material_id, updates) for material_id in ids]
+        return patch_materials_batch(save_path, patches)
 
     # ── Creación de segmentos ─────────────────────────────────────────────────
 
