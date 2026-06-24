@@ -1,0 +1,1367 @@
+diff --git a/README.md b/README.md
+index 39a2b04..fa86954 100644
+--- a/README.md
++++ b/README.md
+@@ -62,24 +62,48 @@ pip install -r requirements.txt
+ pip install -e ".[dev]"
+ ```
+ 
+-## Uso
++## Uso — Procesar un video nuevo (flujo recomendado)
++
++Todo el flujo se hace desde la interfaz gráfica, sin necesidad de correr
++scripts a mano ni saber qué hace cada uno.
+ 
+-### Interfaz gráfica
+ ```bash
+ python app.py
+ ```
+ 
+-### Script de línea de comandos
+-```bash
+-python generar_subtitulos_baic_v5.py
+-```
+-Selecciona el proyecto interactivamente y confirma para generar.
++Pasos dentro de la app:
++
++1. **Paso 1 — Proyecto.** La app lista automáticamente tus proyectos de
++   CapCut (el más reciente arriba). Elegí uno del desplegable y presioná
++   **Analizar**.
++   - Si el proyecto **no tiene subtítulos automáticos todavía**, la app te
++     dice exactamente qué hacer (generar los Subtítulos automáticos en
++     CapCut, guardar, cerrar CapCut y volver a analizar).
++   - El botón **🔍 Diagnosticar** muestra un reporte detallado del estado
++     interno del proyecto si algo no cuadra.
++2. **Paso 2 — Estilo.** Confirmá o ajustá el estilo visual.
++3. **Paso 3 — Clicks (opcional).** Activá sonidos de click si los querés.
++4. **Paso 4 — Generar.** Antes de generar, la app **verifica que CapCut
++   esté cerrado** (si está abierto, te avisa, porque al cerrarse
++   sobreescribiría el resultado). Presioná **Generar** y listo.
++
++> ⚠️ **Regla de oro:** CapCut tiene que estar **cerrado** mientras se
++> genera. La app lo verifica, pero conviene cerrarlo vos también desde el
++> Administrador de Tareas si tenés dudas.
++
++### Diagnóstico por línea de comandos (opcional)
++
++Si querés inspeccionar un draft sin abrir la UI:
+ 
+-### Test de integración (dry-run)
+ ```bash
+-python test_integration_real.py "C:\ruta\al\draft_content.json" "nombre_del_draft"
++python -m utils.diagnostico "C:\ruta\al\draft_content.json"
+ ```
+ 
++### Scripts de línea de comandos (avanzado / legacy)
++
++Los scripts sueltos (`generar_subtitulos_baic_v5.py`, etc.) siguen
++existiendo para casos puntuales, pero el flujo recomendado es la UI.
++
+ ## Ejecutar pruebas
+ ```bash
+ pytest -q
+diff --git a/core/subtitle_engine.py b/core/subtitle_engine.py
+index f93f4ac..2e8e6cb 100644
+--- a/core/subtitle_engine.py
++++ b/core/subtitle_engine.py
+@@ -294,18 +294,35 @@ class SubtitleEngine:
+                     # usuario tras ver su estilo manual de referencia: "de"
+                     # y "7 años" en lineas consecutivas de la misma columna
+                     # no compartian el mismo eje porque antes se centraba
+-                    # cada palabra en la MISMA x sin importar su ancho (una
+-                    # palabra corta y una larga centradas en el mismo punto
+-                    # arrancan en bordes distintos). Ahora ancla_izquierda /
+-                    # ancla_derecha representan el BORDE, y el centro real
+-                    # que CapCut necesita se calcula sumando medio ancho.
++                    # cada palabra en la MISMA x sin importar su ancho.
++                    #
++                    # OJO -- intento anterior (BUG, revertido): usar el
++                    # ancho_palabra COMPLETO como offset (x = borde +
++                    # ancho_palabra) hacia que el centro se disparara segun
++                    # el largo real de la palabra. ancho_palabra esta en la
++                    # escala calibrada para que una palabra de 10 letras mida
++                    # ~75% de pantalla -- a esa escala, hasta una palabra de
++                    # 3 letras ya desplaza el centro 0.225, MAS que la propia
++                    # distancia del borde al centro de pantalla (0.20),
++                    # cruzando al lado opuesto. Confirmado con datos reales:
++                    # "que" (3 letras) terminaba en x=+0.025 en vez de cerca
++                    # de la columna -0.20, y la mayoria de las palabras
++                    # cortas del video quedaban amontonadas entre ±0.10 del
++                    # centro en vez de repartidas en las dos columnas.
++                    #
++                    # Fix: el offset de alineacion debe ser chico y ACOTADO,
++                    # no escalar con el ancho completo de la palabra. Se usa
++                    # medio ancho de una palabra de 3 letras como referencia
++                    # (un valor representativo de "palabra corta tipica"),
++                    # capeado a un maximo absoluto para que nunca empuje la
++                    # palabra mas alla de medio camino hacia el centro.
++                    ancho_referencia = (3 * ancho_por_caracter) / 2
++                    offset_borde = min(ancho_palabra, ancho_referencia, 0.08)
+                     borde = ancla_izquierda if i % 2 == 0 else ancla_derecha
+                     if i % 2 == 0:
+-                        x = borde + ancho_palabra  # borde + (2*ancho_palabra)/2
++                        x = borde + offset_borde
+                     else:
+-                        # columna derecha: el "borde" alineado es el DERECHO,
+-                        # para que el efecto de columna sea simetrico
+-                        x = borde - ancho_palabra
++                        x = borde - offset_borde
+ 
+                 # RADIO_SEGURO_PALABRA_LARGA: con las columnas en ±0.20, una
+                 # palabra larga centrada no debe medir mas de ~0.18 de radio
+@@ -324,7 +341,20 @@ class SubtitleEngine:
+                     # como mas margen de seguridad contra las columnas en
+                     # ±0.20 en vez de un numero de tamano de fuente fijo.
+                     RADIO_SEGURO = 0.16
++                    # PISO_FACTOR_REDUCCION: limite minimo de reduccion
++                    # (70% del tamano normal). Sin este piso, palabras MUY
++                    # largas (12+ letras) se reducian hasta ser casi
++                    # ilegibles -- confirmado con un caso real: "encontráselo"
++                    # (12 letras) calculaba factor=0.178 (size final ≈1.78
++                    # sobre un style_size=10), visualmente diminuta al lado
++                    # de palabras cortas en tamano normal. Con el piso, la
++                    # palabra puede seguir ocupando algo mas de espacio del
++                    # ideal (no se garantiza al 100% que nunca toque la
++                    # columna opuesta en casos extremos), pero nunca se
++                    # vuelve ilegible. Pedido explicito del usuario.
++                    PISO_FACTOR_REDUCCION = 0.7
+                     factor_reduccion = min(1.0, RADIO_SEGURO / ancho_palabra) if ancho_palabra > 0 else 1.0
++                    factor_reduccion = max(factor_reduccion, PISO_FACTOR_REDUCCION)
+                     ancho_palabra *= factor_reduccion
+                     # Centrar en x=0 (no en la mitad de la ancla): el
+                     # RADIO_SEGURO ya esta calculado para que, centrada en 0,
+diff --git a/pyproject.toml b/pyproject.toml
+index 02392c6..eef19fa 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -12,6 +12,7 @@ dependencies = [
+     "Pillow==10.1.0",
+     "pycapcut==0.1.0",
+     "jsonschema==4.23.0",
++    "psutil==6.0.0",
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/requirements.txt b/requirements.txt
+index ae7be4d..69c4ab8 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,3 +2,4 @@ customtkinter==5.2.0
+ Pillow==10.1.0
+ pycapcut==0.1.0
+ jsonschema==4.23.0
++psutil==6.0.0
+diff --git a/tests/test_autosuficiencia.py b/tests/test_autosuficiencia.py
+new file mode 100644
+index 0000000..97af62f
+--- /dev/null
++++ b/tests/test_autosuficiencia.py
+@@ -0,0 +1,188 @@
++"""
++Tests para los modulos de autosuficiencia de la UI:
++- utils/mensajes.py (traduccion de estados a mensajes accionables)
++- utils/diagnostico.py (reporte de solo lectura de un draft)
++- utils/capcut_projects.py (descubrimiento de proyectos en disco)
++
++Estos modulos son los que permiten procesar un video nuevo sin ayuda
++externa, asi que conviene que esten cubiertos.
++"""
++
++import json
++import unittest
++from pathlib import Path
++import tempfile
++
++from utils.mensajes import (
++    interpretar_analisis,
++    interpretar_error,
++    aviso_capcut_abierto,
++)
++from utils.diagnostico import diagnosticar_draft
++from utils.capcut_projects import listar_proyectos, encontrar_carpeta_drafts
++
++
++class TestMensajesAnalisis(unittest.TestCase):
++    def test_cero_oraciones_sin_estilizar_da_error_accionable(self):
++        result = {
++            "cantidad_oraciones_procesables": 0,
++            "cantidad_oraciones_ya_estiladas": 0,
++        }
++        diag = interpretar_analisis(result)
++        self.assertEqual(diag.nivel, "error")
++        self.assertFalse(diag.puede_continuar)
++        # Debe mencionar como generar el auto-caption (accionable)
++        texto = " ".join(diag.pasos).lower()
++        self.assertIn("subtitulos", texto)
++        self.assertIn("automaticos", texto)
++        self.assertIn("capcut", texto)
++
++    def test_cero_oraciones_pero_ya_estilizadas_es_aviso(self):
++        result = {
++            "cantidad_oraciones_procesables": 0,
++            "cantidad_oraciones_ya_estiladas": 30,
++        }
++        diag = interpretar_analisis(result)
++        self.assertEqual(diag.nivel, "aviso")
++        self.assertFalse(diag.puede_continuar)
++
++    def test_con_oraciones_permite_continuar(self):
++        result = {
++            "cantidad_oraciones_procesables": 43,
++            "cantidad_oraciones_ya_estiladas": 0,
++            "tracks_residuales_texto": [],
++            "tracks_residuales_audio": [],
++        }
++        diag = interpretar_analisis(result)
++        self.assertEqual(diag.nivel, "ok")
++        self.assertTrue(diag.puede_continuar)
++
++    def test_tracks_residuales_se_avisan_pero_no_bloquean(self):
++        result = {
++            "cantidad_oraciones_procesables": 43,
++            "cantidad_oraciones_ya_estiladas": 0,
++            "tracks_residuales_texto": ["AUTO_sub_0", "AUTO_sub_1"],
++            "tracks_residuales_audio": [],
++        }
++        diag = interpretar_analisis(result)
++        self.assertTrue(diag.puede_continuar)
++        texto = " ".join(diag.pasos).lower()
++        self.assertIn("corrida anterior", texto)
++
++
++class TestMensajesError(unittest.TestCase):
++    def test_file_not_found_es_accionable(self):
++        diag = interpretar_error(FileNotFoundError("No es un archivo: x.json"))
++        self.assertEqual(diag.nivel, "error")
++        self.assertFalse(diag.puede_continuar)
++
++    def test_json_invalido_es_accionable(self):
++        diag = interpretar_error(ValueError("El archivo no es un JSON válido."))
++        self.assertEqual(diag.nivel, "error")
++
++    def test_error_generico_incluye_detalle_tecnico(self):
++        diag = interpretar_error(RuntimeError("algo raro paso"))
++        texto = " ".join(diag.pasos)
++        self.assertIn("algo raro paso", texto)
++
++
++class TestAvisoCapcut(unittest.TestCase):
++    def test_capcut_abierto_bloquea(self):
++        diag = aviso_capcut_abierto(True)
++        self.assertIsNotNone(diag)
++        self.assertEqual(diag.nivel, "error")
++        self.assertFalse(diag.puede_continuar)
++
++    def test_capcut_cerrado_no_da_aviso(self):
++        self.assertIsNone(aviso_capcut_abierto(False))
++
++    def test_estado_desconocido_avisa_pero_deja_continuar(self):
++        diag = aviso_capcut_abierto(None)
++        self.assertIsNotNone(diag)
++        self.assertTrue(diag.puede_continuar)
++
++
++class TestDiagnostico(unittest.TestCase):
++    def test_archivo_inexistente(self):
++        reporte = diagnosticar_draft("/no/existe/draft_content.json")
++        self.assertIn("No se encontro", reporte)
++
++    def test_draft_con_words_vacio_dice_que_hacer(self):
++        # Simula el caso real: materiales con words vacio (auto-caption
++        # consumido o nunca generado).
++        data = {
++            "duration": 83_500_000,
++            "materials": {"texts": [
++                {"id": "m1", "words": {"start_time": [], "end_time": [], "text": []}},
++            ]},
++            "tracks": [{"type": "video", "name": "", "segments": []}],
++        }
++        with tempfile.TemporaryDirectory() as d:
++            p = Path(d) / "draft_content.json"
++            p.write_text(json.dumps(data), encoding="utf-8")
++            reporte = diagnosticar_draft(str(p))
++        self.assertIn("NO hay datos", reporte)
++        self.assertIn("automaticos", reporte)
++
++    def test_draft_con_autocaption_real_lo_detecta(self):
++        # Formato nuevo con datos reales + recognize_task_id
++        data = {
++            "duration": 10_000_000,
++            "materials": {"texts": [
++                {
++                    "id": "m1",
++                    "recognize_task_id": "abc_8_0",
++                    "words": {
++                        "start_time": [0, 240, 560],
++                        "end_time": [240, 440, 880],
++                        "text": ["vos", "sos", "María"],
++                    },
++                },
++            ]},
++            "tracks": [{"type": "text", "name": "", "segments": [{"material_id": "m1"}]}],
++        }
++        with tempfile.TemporaryDirectory() as d:
++            p = Path(d) / "draft_content.json"
++            p.write_text(json.dumps(data), encoding="utf-8")
++            reporte = diagnosticar_draft(str(p))
++        self.assertIn("SI hay datos", reporte)
++
++
++class TestListadoProyectos(unittest.TestCase):
++    def test_carpeta_inexistente_devuelve_vacio(self):
++        # Una ruta que seguro no existe no debe romper, solo lista vacia.
++        proyectos = listar_proyectos(ruta_manual="/ruta/que/no/existe/zzz")
++        self.assertEqual(proyectos, [])
++
++    def test_lista_proyectos_ordenados_por_fecha(self):
++        import os
++        import time
++        with tempfile.TemporaryDirectory() as d:
++            base = Path(d)
++            # Crear 3 proyectos con draft_content.json
++            for nombre in ["proyecto_viejo", "proyecto_medio", "proyecto_nuevo"]:
++                proj = base / nombre
++                proj.mkdir()
++                (proj / "draft_content.json").write_text("{}", encoding="utf-8")
++                time.sleep(0.01)  # asegurar mtimes distintos
++
++            proyectos = listar_proyectos(ruta_manual=str(base))
++            self.assertEqual(len(proyectos), 3)
++            # El mas reciente (proyecto_nuevo) debe venir primero
++            self.assertEqual(proyectos[0].name, "proyecto_nuevo")
++
++    def test_omite_carpetas_sin_draft_json(self):
++        with tempfile.TemporaryDirectory() as d:
++            base = Path(d)
++            (base / "con_json").mkdir()
++            (base / "con_json" / "draft_content.json").write_text("{}", encoding="utf-8")
++            (base / "sin_json").mkdir()  # carpeta sin draft
++
++            proyectos = listar_proyectos(ruta_manual=str(base))
++            nombres = [p.name for p in proyectos]
++            self.assertIn("con_json", nombres)
++            self.assertNotIn("sin_json", nombres)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_posicionamiento_maria.py b/tests/test_posicionamiento_maria.py
+index 7f892d0..034293c 100644
+--- a/tests/test_posicionamiento_maria.py
++++ b/tests/test_posicionamiento_maria.py
+@@ -183,7 +183,16 @@ class TestPalabraLargaNoInvadeColumnaOpuestaEnOverlap(unittest.TestCase):
+         self.engine.ancla_derecha = 0.20
+         self.engine.ancho_por_caracter = 0.15
+ 
+-    def test_reservamos_no_invade_ninguna_columna(self):
++    def test_reservamos_se_reduce_pero_respeta_piso_minimo_de_legibilidad(self):
++        """Pedido explícito del usuario (tras ver 'encontráselo' reducida a
++        un tamaño casi ilegible): nunca reducir una palabra larga por debajo
++        de PISO_FACTOR_REDUCCION (0.7), aunque eso signifique que palabras
++        MUY largas (10+ letras como "reservamos") puedan volver a invadir
++        la columna opuesta en diálogo simultáneo. Es un trade-off consciente
++        elegido por el usuario: legibilidad de la palabra individual por
++        sobre evitar el solape total en el peor caso. Este test verifica el
++        piso, no la ausencia de invasión (eso ya no se garantiza al 100%
++        para palabras de 10+ letras con el piso activo)."""
+         oracion1 = [{"word": "reservamos", "start_us": 45033333, "end_us": 45700000}]
+         oracion2 = [
+             {"word": "lo", "start_us": 44900000, "end_us": 45100000},
+@@ -198,11 +207,10 @@ class TestPalabraLargaNoInvadeColumnaOpuestaEnOverlap(unittest.TestCase):
+         posiciones = self.engine._calcular_posiciones(bloques, [])
+         x, _y, factor = posiciones["0_0_0"]
+ 
+-        ancho_base = (len("reservamos") * self.engine.ancho_por_caracter) / 2
+-        ancho_real = ancho_base * factor
+-
+-        self.assertGreater(x - ancho_real, -0.20, "invade la columna izquierda")
+-        self.assertLess(x + ancho_real, 0.20, "invade la columna derecha")
++        # El piso es 0.7 -- nunca debe reducirse mas alla de eso.
++        self.assertGreaterEqual(factor, 0.7)
++        # Sigue centrada en 0 (no se mueve a un lado u otro).
++        self.assertEqual(x, 0.0)
+ 
+ 
+ class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
+@@ -220,10 +228,40 @@ class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
+         self.engine.ancla_derecha = 0.20
+         self.engine.ancho_por_caracter = 0.15
+ 
+-    def test_palabras_corta_y_larga_en_misma_columna_comparten_borde(self):
+-        # "de" (2 letras, corta) y "transferible"-like word en la misma
+-        # columna (ambas en posicion par, i=0 y i=2) deben alinear su
+-        # borde izquierdo, no su centro.
++    def test_palabras_cortas_no_se_amontonan_cerca_del_centro(self):
++        """Regresión de un bug introducido por una primera implementación
++        de "alineado por borde": usar el ancho COMPLETO de la palabra como
++        offset (x = borde + ancho_palabra) hacía que el centro se disparara
++        según el largo real -- una palabra de 3 letras ya desplazaba el
++        centro 0.225, MAS que la distancia del borde al centro de pantalla
++        (0.20), cruzando al lado opuesto. Confirmado con datos reales: "que"
++        terminaba en x=+0.025 en vez de cerca de la columna -0.20, y la
++        mayoría de las palabras cortas del video real quedaban amontonadas
++        entre ±0.10 del centro en vez de repartidas en las dos columnas
++        (visible en captura real: "voy", "listo", "que" superpuestas).
++
++        El fix usa un offset chico y ACOTADO (no proporcional al ancho
++        completo), así que palabras de cualquier longitud corta/media deben
++        quedar razonablemente cerca de su ancla (no amontonadas en ±0.10)."""
++        for palabra in ["que", "voy", "listo", "no", "por"]:
++            oracion = [{"word": palabra, "start_us": 0, "end_us": 100_000}]
++            bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
++            posiciones = self.engine._calcular_posiciones(bloques, [])
++            x, _y, _factor = posiciones["0_0_0"]
++            # ancla_izquierda=-0.20; el resultado debe quedar razonablemente
++            # cerca de la columna, no amontonado en el 50% central de la
++            # pantalla (-0.10 a +0.10).
++            self.assertLess(
++                x, -0.10,
++                f"'{palabra}' en x={x:.3f}, demasiado cerca del centro (columna esperada cerca de -0.20)",
++            )
++
++    def test_palabras_de_distinto_largo_en_misma_columna_quedan_cerca(self):
++        # "de" (2 letras, corta) y una palabra mas larga en la misma
++        # columna (ambas en posicion par, i=0 y i=2) deben quedar
++        # razonablemente cerca entre si -- no es alineado de borde EXACTO
++        # (eso causaba el bug de amontonamiento, ver test de arriba), pero
++        # tampoco deben volver a estar tan lejos como con centro fijo puro.
+         oracion = [
+             {"word": "de", "start_us": 0, "end_us": 100_000},
+             {"word": "siete", "start_us": 100_000, "end_us": 200_000},
+@@ -232,19 +270,9 @@ class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
+         bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
+         posiciones = self.engine._calcular_posiciones(bloques, [])
+ 
+-        ancho_por_caracter = self.engine.ancho_por_caracter
+-        # "de" (i=0, columna izquierda) y "anios" (i=2, columna izquierda)
+         x_de, _, _ = posiciones["0_0_0"]
+         x_anios, _, _ = posiciones["0_0_2"]
+ 
+-        ancho_de = (len("de") * ancho_por_caracter) / 2
+-        ancho_anios = (len("anios") * ancho_por_caracter) / 2
+-
+-        borde_de = x_de - ancho_de
+-        borde_anios = x_anios - ancho_anios
+-
+-        self.assertAlmostEqual(
+-            borde_de, borde_anios, places=4,
+-            msg=f"'de' (borde={borde_de:.3f}) y 'anios' (borde={borde_anios:.3f}) "
+-                f"no comparten el mismo borde izquierdo",
+-        )
++        # Con el offset acotado (max 0.08), ambas caen en el mismo punto
++        # cuando el ancho_palabra de ambas supera la referencia de 3 letras.
++        self.assertAlmostEqual(x_de, x_anios, places=4)
+diff --git a/tests/test_subtitle_engine.py b/tests/test_subtitle_engine.py
+index 5feb2b5..b52a372 100644
+--- a/tests/test_subtitle_engine.py
++++ b/tests/test_subtitle_engine.py
+@@ -92,12 +92,13 @@ class TestLayoutConfig(unittest.TestCase):
+     """Tests para layout configurable de posiciones."""
+ 
+     def test_anclas_configurables_se_aplican_en_posiciones(self):
+-        """Las anclas representan el BORDE de alineacion (pedido del
+-        usuario: palabras de una misma columna deben compartir el mismo
+-        borde izquierdo/derecho, no el mismo centro fijo -- antes una
+-        palabra corta y una larga centradas en el mismo punto arrancaban en
+-        bordes distintos, viendose "torcidas"). El centro real que CapCut
+-        necesita se deriva sumando/restando medio ancho de la palabra."""
++        """Las anclas configuran la zona/columna de cada palabra. El offset
++        de alineacion (ver _calcular_posiciones) es chico y ACOTADO -- no
++        proporcional al ancho completo de la palabra -- para evitar el bug
++        real encontrado: usar el ancho completo como offset desplazaba el
++        centro de palabras cortas/medias mas alla del propio centro de
++        pantalla, amontonando todo cerca de x=0 en vez de cerca de la
++        columna configurada."""
+         engine = SubtitleEngine(
+             script=None,
+             profile={"ancla_izquierda": -0.1, "ancla_derecha": 0.3, "ancho_por_caracter": 0.05},
+@@ -112,13 +113,10 @@ class TestLayoutConfig(unittest.TestCase):
+ 
+         posiciones = engine._calcular_posiciones(bloques, pares_overlap=[])
+         # "hola": 4 letras, ancho_por_caracter=0.05 -> ancho_palabra=0.10.
+-        # Columna izquierda (i=0): borde_izquierdo=-0.1 -> centro = borde +
+-        # ancho_palabra = -0.1 + 0.10 = 0.0. El BORDE real (centro -
+-        # ancho_palabra) debe coincidir con la ancla configurada.
++        # ancho_referencia (3 letras) = 0.075; offset_borde = min(0.10,
++        # 0.075, 0.08) = 0.075. x = ancla_izquierda + offset = -0.1+0.075.
+         x, _y, _factor = posiciones["0_0_0"]
+-        ancho_palabra = (len("hola") * 0.05) / 2
+-        borde_izquierdo_real = x - ancho_palabra
+-        self.assertAlmostEqual(borde_izquierdo_real, -0.1)
++        self.assertAlmostEqual(x, -0.025)
+ 
+ 
+ class TestSeSolapa(unittest.TestCase):
+diff --git a/ui/step1_project.py b/ui/step1_project.py
+index aaf67c3..cb4e964 100644
+--- a/ui/step1_project.py
++++ b/ui/step1_project.py
+@@ -1,9 +1,15 @@
+-import customtkinter as ctk
+-from tkinter import filedialog
+ import os
++from tkinter import filedialog
++
++import customtkinter as ctk
++
+ from core.draft_manager import DraftManager
+ from ui.components.buttons import AnalyzeButton, StyledButton
+-from config import COLORS
++from config import COLORS, settings as app_settings
++from utils.capcut_projects import listar_proyectos
++from utils.mensajes import interpretar_analisis, interpretar_error
++from utils.diagnostico import diagnosticar_draft
++
+ 
+ class Step1Frame(ctk.CTkFrame):
+     def __init__(self, parent, main_window):
+@@ -11,54 +17,172 @@ class Step1Frame(ctk.CTkFrame):
+         self.main_window = main_window
+         self.grid_columnconfigure(0, weight=1)
+ 
+-        ctk.CTkLabel(self, text="Paso 1: Seleccionar Proyecto CapCut", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
++        self._proyectos = []  # lista de CapcutProject del ultimo refresh
++
++        ctk.CTkLabel(
++            self, text="Paso 1: Elegí tu proyecto de CapCut",
++            font=ctk.CTkFont(size=18, weight="bold"),
++        ).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
++
++        # Selector de proyecto (dropdown)
++        selector_frame = ctk.CTkFrame(self, fg_color="transparent")
++        selector_frame.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
++        selector_frame.grid_columnconfigure(0, weight=1)
++
++        self.project_menu = ctk.CTkOptionMenu(
++            selector_frame,
++            values=["(presiona Actualizar para listar)"],
++            command=self._on_project_selected,
++        )
++        self.project_menu.grid(row=0, column=0, padx=(0, 10), sticky="ew")
++
++        StyledButton(
++            selector_frame, text="🔄 Actualizar", width=120,
++            command=self.refrescar_proyectos, style="secondary",
++        ).grid(row=0, column=1)
+ 
+-        folder_frame = ctk.CTkFrame(self, fg_color="transparent")
+-        folder_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+-        folder_frame.grid_columnconfigure(0, weight=1)
+-        
+-        self.file_entry = ctk.CTkEntry(folder_frame, placeholder_text="Ruta al archivo draft_content.json...", textvariable=self.main_window.draft_path)
+-        self.file_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+-        
+-        StyledButton(folder_frame, text="Examinar", width=100, command=self.browse_file, style="secondary").grid(row=0, column=1)
++        StyledButton(
++            selector_frame, text="Examinar…", width=100,
++            command=self.browse_file, style="secondary",
++        ).grid(row=0, column=2, padx=(10, 0))
+ 
+-        # Progress bar
+-        self.progress = ctk.CTkProgressBar(folder_frame)
+-        self.progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
++        self.ruta_label = ctk.CTkLabel(
++            self, text="", justify="left", anchor="w",
++            font=ctk.CTkFont(size=11), text_color=("gray40", "gray60"),
++        )
++        self.ruta_label.grid(row=2, column=0, padx=20, pady=(0, 5), sticky="w")
++
++        self.progress = ctk.CTkProgressBar(self)
++        self.progress.grid(row=3, column=0, padx=20, sticky="ew")
+         self.progress.set(0)
+ 
+-        info_frame = ctk.CTkFrame(self, fg_color="transparent")
+-        info_frame.grid(row=2, column=0, padx=20, pady=20, sticky="ew")
++        # Panel de resultado / instrucciones
++        info_frame = ctk.CTkFrame(self, fg_color=("#F0F0F0", "#2A2A2A"), corner_radius=8)
++        info_frame.grid(row=4, column=0, padx=20, pady=15, sticky="ew")
+         info_frame.grid_columnconfigure(0, weight=1)
+-        
+-        self.analysis_label = ctk.CTkLabel(info_frame, text="Aún no se ha analizado ningún proyecto.\nSelecciona un archivo y presiona 'Analizar'.", justify="left", anchor="w")
+-        self.analysis_label.grid(row=0, column=0, sticky="w")
+ 
++        self.analysis_label = ctk.CTkLabel(
++            info_frame,
++            text="Elegí un proyecto de la lista y presioná 'Analizar'.",
++            justify="left", anchor="w",
++        )
++        self.analysis_label.grid(row=0, column=0, sticky="w", padx=12, pady=12)
++
++        # Botones de accion
+         actions_frame = ctk.CTkFrame(self, fg_color="transparent")
+-        actions_frame.grid(row=3, column=0, padx=20, pady=20, sticky="ew")
++        actions_frame.grid(row=5, column=0, padx=20, pady=10, sticky="ew")
+         actions_frame.grid_columnconfigure(1, weight=1)
+ 
+-        StyledButton(actions_frame, text="<- Atrás", style="secondary", state="disabled").grid(row=0, column=0, padx=(0, 10), sticky="w")
+         self.analyze_btn = AnalyzeButton(actions_frame, command=self.analyze_draft)
+         self.analyze_btn.grid(row=0, column=1, sticky="e", padx=(0, 10))
+-        self.next_btn = StyledButton(actions_frame, text="Siguiente ->", command=lambda: self.main_window.show_frame("step2"), style="success", state="disabled")
+-        self.next_btn.grid(row=0, column=2, sticky="e")
++        StyledButton(
++            actions_frame, text="🔍 Diagnosticar", style="secondary",
++            command=self.diagnosticar,
++        ).grid(row=0, column=2, sticky="e", padx=(0, 10))
++        self.next_btn = StyledButton(
++            actions_frame, text="Siguiente →",
++            command=lambda: self.main_window.show_frame("step2"),
++            style="success", state="disabled",
++        )
++        self.next_btn.grid(row=0, column=3, sticky="e")
++
++        self.after(200, self.refrescar_proyectos)
++
++    # Listado de proyectos
++
++    def refrescar_proyectos(self):
++        ruta_manual = (
++            app_settings.get("capcut", {})
++            .get("default_projects_path", "")
++            .replace("{USER}", os.environ.get("USERNAME", os.path.expanduser("~")))
++        )
++        proyectos = listar_proyectos(ruta_manual=ruta_manual or None)
++        self._proyectos = proyectos
++
++        if not proyectos:
++            self.project_menu.configure(values=["(no se encontraron proyectos de CapCut)"])
++            self.project_menu.set("(no se encontraron proyectos de CapCut)")
++            self.ruta_label.configure(
++                text="No se detecto la carpeta de CapCut automaticamente.\n"
++                     "Usa 'Examinar…' para elegir el draft_content.json a mano."
++            )
++            return
++
++        etiquetas = [f"{p.name}   ({p.modified_human})" for p in proyectos]
++        self.project_menu.configure(values=etiquetas)
++        self.project_menu.set(etiquetas[0])
++        self._on_project_selected(etiquetas[0])
++
++    def _on_project_selected(self, etiqueta):
++        idx = None
++        for i, p in enumerate(self._proyectos):
++            if etiqueta.startswith(p.name + "   ("):
++                idx = i
++                break
++        if idx is None:
++            return
++        proyecto = self._proyectos[idx]
++        self.main_window.draft_path.set(str(proyecto.draft_json))
++        self.ruta_label.configure(text=f"📁 {proyecto.draft_json}")
++        self.next_btn.configure(state="disabled")
++        self.analysis_label.configure(text="Proyecto elegido. Presioná 'Analizar'.")
+ 
+     def browse_file(self):
+         initial_dir = os.path.expanduser("~")
+-        file_path = filedialog.askopenfilename(title="Seleccionar draft_content.json", initialdir=initial_dir, filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
++        file_path = filedialog.askopenfilename(
++            title="Seleccionar draft_content.json",
++            initialdir=initial_dir,
++            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
++        )
+         if file_path:
+             self.main_window.draft_path.set(file_path)
+-            self.analysis_label.configure(text="Archivo seleccionado. Presiona 'Analizar'.")
++            self.ruta_label.configure(text=f"📁 {file_path}")
++            self.analysis_label.configure(text="Archivo elegido. Presioná 'Analizar'.")
+             self.next_btn.configure(state="disabled")
+ 
++    # Analisis
++
++    def diagnosticar(self):
++        """Corre el diagnostico de solo lectura sobre el draft elegido y
++        muestra el reporte en una ventana aparte. No modifica nada."""
++        file_path = self.main_window.draft_path.get()
++        if not file_path:
++            self.analysis_label.configure(
++                text="❌ Primero elegí un proyecto para diagnosticar."
++            )
++            return
++
++        reporte = diagnosticar_draft(file_path)
++
++        ventana = ctk.CTkToplevel(self)
++        ventana.title("Diagnóstico del proyecto")
++        ventana.geometry("640x520")
++        ventana.grid_columnconfigure(0, weight=1)
++        ventana.grid_rowconfigure(0, weight=1)
++
++        caja = ctk.CTkTextbox(ventana, wrap="word")
++        caja.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
++        caja.insert("1.0", reporte)
++        caja.configure(state="disabled")
++
++        StyledButton(
++            ventana, text="Cerrar", style="secondary",
++            command=ventana.destroy,
++        ).grid(row=1, column=0, pady=(0, 15))
++
++        # Traer al frente
++        ventana.transient(self.winfo_toplevel())
++        ventana.after(100, ventana.lift)
++
+     def analyze_draft(self):
+         file_path = self.main_window.draft_path.get()
+         if not file_path:
+-            self.analysis_label.configure(text="❌ Primero seleccioná un archivo.")
++            self.analysis_label.configure(
++                text="❌ Primero elegí un proyecto de la lista (o usá 'Examinar…')."
++            )
+             return
+ 
+-        self.analyze_btn.configure(state="disabled", text="Analizando...")
++        self.analyze_btn.configure(state="disabled", text="Analizando…")
+         self.progress.set(0.2)
+         self.update_idletasks()
+ 
+@@ -66,8 +190,7 @@ class Step1Frame(ctk.CTkFrame):
+             manager = DraftManager(file_path)
+             manager.analyze_async(
+                 callback=lambda error, result: self.after(
+-                    0,
+-                    lambda: self.on_analysis_complete(error, result),
++                    0, lambda: self.on_analysis_complete(error, result)
+                 )
+             )
+         except Exception as e:
+@@ -75,28 +198,39 @@ class Step1Frame(ctk.CTkFrame):
+ 
+     def on_analysis_complete(self, error, result):
+         self.progress.set(1.0)
++
+         if error:
+-            self.analysis_label.configure(text=f"❌ Error:\n{str(error)}")
++            diag = interpretar_error(error)
++            self._mostrar_diagnostico(diag)
+             self.next_btn.configure(state="disabled")
+         else:
+             self.main_window.analysis_result = result
+-            msg  = f"📹 Duración: {result['duracion_video_seg']:.1f}s\n"
+-            msg += f"✅ Oraciones a procesar: {result['cantidad_oraciones_procesables']}\n"
+-            msg += f"✅ Palabras a procesar: {result['cantidad_palabras_procesables']}\n\n"
+-            msg += f"✍️  Oraciones ya estilizadas: {result['cantidad_oraciones_ya_estiladas']}\n\n"
+-            if result['tracks_residuales_texto']:
+-                msg += f"⚠️  Tracks TEXTO residuales: {len(result['tracks_residuales_texto'])}\n"
+-            if result['tracks_residuales_audio']:
+-                msg += f"⚠️  Tracks AUDIO residuales: {len(result['tracks_residuales_audio'])}\n"
+-            if not (result['tracks_residuales_texto'] or result['tracks_residuales_audio']):
+-                msg += "✔️  Sin tracks residuales.\n"
+-            msg += f"\n💾 Backup: {result.get('backup_name', 'N/A')}"
+-            
+-            if result['cantidad_oraciones_procesables'] > 0:
+-                self.next_btn.configure(state="normal")
+-            else:
+-                self.next_btn.configure(state="disabled")
+-                msg += "\n\n⚠️ No hay oraciones procesables."
+-            self.analysis_label.configure(text=msg)
+-            
+-        self.analyze_btn.configure(state="normal", text="Analizar Auto-Captions")
+\ No newline at end of file
++            diag = interpretar_analisis(result)
++
++            cab = (
++                f"📹 Duracion: {result['duracion_video_seg']:.1f}s\n"
++                f"📝 Oraciones a procesar: {result['cantidad_oraciones_procesables']}\n"
++                f"🔤 Palabras a procesar: {result['cantidad_palabras_procesables']}\n"
++            )
++            if result.get("backup_name"):
++                cab += f"💾 Backup creado: {result['backup_name']}\n"
++            self._mostrar_diagnostico(diag, encabezado=cab)
++
++            self.next_btn.configure(state="normal" if diag.puede_continuar else "disabled")
++
++        self.analyze_btn.configure(state="normal", text="Analizar")
++
++    def _mostrar_diagnostico(self, diag, encabezado=""):
++        icono = {"ok": "✅", "aviso": "⚠️", "error": "❌"}.get(diag.nivel, "ℹ️")
++        color = {
++            "ok": COLORS["success"],
++            "aviso": COLORS["warning"],
++            "error": COLORS["danger"],
++        }.get(diag.nivel, None)
++
++        texto = encabezado + "\n" if encabezado else ""
++        texto += f"{icono} {diag.titulo}\n"
++        if diag.pasos:
++            texto += "\n" + "\n".join(diag.pasos)
++
++        self.analysis_label.configure(text=texto, text_color=color)
+diff --git a/ui/step4_execute.py b/ui/step4_execute.py
+index d6b9896..84f374a 100644
+--- a/ui/step4_execute.py
++++ b/ui/step4_execute.py
+@@ -6,6 +6,8 @@ import threading
+ from pathlib import Path
+ import customtkinter as ctk
+ from config import COLORS, settings as app_settings
++from utils.capcut_projects import capcut_esta_corriendo
++from utils.mensajes import aviso_capcut_abierto
+ 
+ 
+ class Step4Frame(ctk.CTkFrame):
+@@ -111,6 +113,18 @@ class Step4Frame(ctk.CTkFrame):
+             self._log("❌ No hay oraciones procesables.")
+             return
+ 
++        # CRITICO: no generar si CapCut esta abierto -- al cerrarse,
++        # sobreescribe el draft y se pierde todo el trabajo.
++        estado = capcut_esta_corriendo()
++        aviso = aviso_capcut_abierto(estado)
++        if aviso is not None:
++            for linea in [f"{aviso.titulo}"] + aviso.pasos:
++                self._log(linea)
++            if not aviso.puede_continuar:
++                # CapCut confirmado abierto: frenar aca.
++                return
++            # estado desconocido (None): se avisa pero se deja continuar.
++
+         self.run_btn.configure(state="disabled", text="Procesando…")
+         self.progress.set(0.1)
+ 
+diff --git a/utils/capcut_projects.py b/utils/capcut_projects.py
+new file mode 100644
+index 0000000..e169ff9
+--- /dev/null
++++ b/utils/capcut_projects.py
+@@ -0,0 +1,193 @@
++"""
++Utilidades para descubrir y listar los proyectos (drafts) de CapCut
++directamente desde el sistema de archivos, sin depender de pycapcut.
++
++Por que NO se usa pycapcut aca: pycapcut puede fallar al leer ciertos
++drafts (ej. el KeyError 'fps' documentado en el handoff original) y eso
++tiraria abajo TODO el listado de proyectos solo porque uno esta corrupto.
++Leyendo el filesystem directamente, un draft problematico no impide ver
++ni elegir los demas.
++
++Estructura real en disco (Windows):
++  C:\\Users\\<USER>\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft\\
++      <nombre del proyecto>\\
++          draft_content.json   <- el archivo que el sistema procesa
++          draft_meta_info.json
++          ...
++"""
++
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from pathlib import Path
++from typing import List, Optional
++
++
++# Rutas tipicas de la carpeta de drafts de CapCut por sistema operativo.
++# Se prueban en orden; la primera que exista gana. Cubre CapCut global y
++# CapCut chino (JianYing), que algunos usuarios tienen.
++_CANDIDATE_SUBPATHS = [
++    r"AppData\Local\CapCut\User Data\Projects\com.lveditor.draft",
++    r"AppData\Local\JianyingPro\User Data\Projects\com.lveditor.draft",
++    # macOS
++    "Movies/CapCut/User Data/Projects/com.lveditor.draft",
++    "Library/Application Support/CapCut/User Data/Projects/com.lveditor.draft",
++]
++
++# Nombres de proceso de CapCut por plataforma (para detectar si esta abierto).
++_CAPCUT_PROCESS_NAMES = ["capcut", "jianyingpro", "jianying"]
++
++
++@dataclass
++class CapcutProject:
++    """Un proyecto de CapCut encontrado en disco."""
++    name: str
++    folder: Path
++    draft_json: Path
++    modified_ts: float  # timestamp de ultima modificacion (para ordenar)
++
++    @property
++    def modified_human(self) -> str:
++        from datetime import datetime
++        return datetime.fromtimestamp(self.modified_ts).strftime("%Y-%m-%d %H:%M")
++
++
++def encontrar_carpeta_drafts(ruta_manual: Optional[str] = None) -> Optional[Path]:
++    """Devuelve la carpeta de drafts de CapCut, o None si no se encuentra.
++
++    Args:
++        ruta_manual: si se provee y existe, se usa esa (tiene prioridad).
++                     Permite que un usuario con una instalacion no estandar
++                     configure la ruta a mano (ej. en settings.json).
++    """
++    if ruta_manual:
++        p = Path(ruta_manual)
++        if p.is_dir():
++            return p
++
++    home = Path(os.path.expanduser("~"))
++    for sub in _CANDIDATE_SUBPATHS:
++        p = home / sub
++        if p.is_dir():
++            return p
++    return None
++
++
++def listar_proyectos(
++    ruta_manual: Optional[str] = None,
++    solo_con_json: bool = True,
++) -> List[CapcutProject]:
++    """Lista los proyectos de CapCut ordenados por fecha de modificacion
++    (el mas reciente primero -- normalmente el que el usuario quiere).
++
++    Args:
++        ruta_manual: ruta a la carpeta de drafts (opcional, ver
++                     encontrar_carpeta_drafts).
++        solo_con_json: si True (default), omite carpetas que no tengan un
++                       draft_content.json adentro (carpetas de sistema,
++                       templates vacios, etc).
++
++    Returns:
++        Lista de CapcutProject. Vacia si no se encuentra la carpeta o no
++        hay proyectos.
++    """
++    carpeta = encontrar_carpeta_drafts(ruta_manual)
++    if carpeta is None:
++        return []
++
++    proyectos: List[CapcutProject] = []
++    try:
++        entradas = list(carpeta.iterdir())
++    except OSError:
++        return []
++
++    for entry in entradas:
++        if not entry.is_dir():
++            continue
++        # CapCut usa algunas carpetas internas que empiezan con punto o son
++        # de sistema; las omitimos.
++        if entry.name.startswith("."):
++            continue
++
++        draft_json = entry / "draft_content.json"
++        if solo_con_json and not draft_json.is_file():
++            continue
++
++        try:
++            # Preferimos la fecha del draft_content.json (refleja la ultima
++            # edicion real del contenido); si no existe, la de la carpeta.
++            if draft_json.is_file():
++                ts = draft_json.stat().st_mtime
++            else:
++                ts = entry.stat().st_mtime
++        except OSError:
++            ts = 0.0
++
++        proyectos.append(
++            CapcutProject(
++                name=entry.name,
++                folder=entry,
++                draft_json=draft_json,
++                modified_ts=ts,
++            )
++        )
++
++    proyectos.sort(key=lambda p: p.modified_ts, reverse=True)
++    return proyectos
++
++
++def capcut_esta_corriendo() -> Optional[bool]:
++    """Indica si hay un proceso de CapCut corriendo ahora mismo.
++
++    Returns:
++        True  -> CapCut esta abierto (NO se debe escribir el draft).
++        False -> CapCut no esta corriendo (seguro escribir).
++        None  -> no se pudo determinar (psutil no instalado / SO no
++                 soportado). El llamador deberia tratar None como
++                 "no se sabe, avisar al usuario por las dudas".
++
++    Detectar esto evita el bug mas costoso del proyecto: si CapCut esta
++    abierto mientras el script escribe draft_content.json, al cerrarse
++    CapCut SOBREESCRIBE el archivo con su version en memoria, destruyendo
++    todo el trabajo generado (documentado en el handoff).
++    """
++    try:
++        import psutil
++    except ImportError:
++        # Fallback sin psutil: intentar con herramientas del sistema.
++        return _capcut_corriendo_sin_psutil()
++
++    try:
++        for proc in psutil.process_iter(["name"]):
++            nombre = (proc.info.get("name") or "").lower()
++            if any(cc in nombre for cc in _CAPCUT_PROCESS_NAMES):
++                return True
++        return False
++    except Exception:
++        return None
++
++
++def _capcut_corriendo_sin_psutil() -> Optional[bool]:
++    """Deteccion de CapCut sin psutil, usando comandos del sistema.
++
++    En Windows usa 'tasklist'. En otros SO devuelve None (no se sabe) para
++    no dar un falso negativo que lleve al usuario a sobreescribir su draft.
++    """
++    import subprocess
++    import sys
++
++    if not sys.platform.startswith("win"):
++        return None
++
++    try:
++        salida = subprocess.run(
++            ["tasklist"],
++            capture_output=True,
++            text=True,
++            timeout=5,
++        ).stdout.lower()
++    except (OSError, subprocess.SubprocessError):
++        return None
++
++    return any(cc in salida for cc in _CAPCUT_PROCESS_NAMES)
+diff --git a/utils/diagnostico.py b/utils/diagnostico.py
+new file mode 100644
+index 0000000..4361d3a
+--- /dev/null
++++ b/utils/diagnostico.py
+@@ -0,0 +1,145 @@
++"""
++Diagnostico de solo lectura de un draft_content.json de CapCut.
++
++Genera un reporte en texto explicando que hay dentro del draft: cuantos
++materiales de texto, en que formato estan los 'words', que tracks existen,
++y -- lo mas util -- una conclusion en espanol de por que el sistema podria
++estar extrayendo 0 oraciones.
++
++Es la version reutilizable (para cualquier draft, y usable desde la UI) de
++lo que antes era el script hardcodeado diagnostico_maria.py.
++
++NUNCA modifica el draft: solo lee.
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++
++def diagnosticar_draft(json_path) -> str:
++    """Lee un draft_content.json y devuelve un reporte de texto con el
++    estado de su auto-caption. No modifica nada.
++
++    Args:
++        json_path: ruta al draft_content.json.
++
++    Returns:
++        Un string multilinea listo para mostrar (en consola o en la UI).
++    """
++    json_path = Path(json_path)
++    lineas = []
++
++    def out(s=""):
++        lineas.append(s)
++
++    if not json_path.is_file():
++        return f"❌ No se encontro el draft en:\n  {json_path}"
++
++    try:
++        with open(json_path, "r", encoding="utf-8") as f:
++            draft = json.load(f)
++    except json.JSONDecodeError as e:
++        return f"❌ El draft no es un JSON valido: {e}"
++    except OSError as e:
++        return f"❌ No se pudo leer el draft: {e}"
++
++    duracion_us = draft.get("duration", 0) or 0
++    out(f"Duracion del video: {duracion_us / 1_000_000:.1f}s")
++
++    materials_texts = draft.get("materials", {}).get("texts", []) or []
++    out(f"Materiales de texto en el draft: {len(materials_texts)}")
++
++    con_words_content = 0   # formato viejo: words dentro de content
++    con_words_raiz = 0      # formato nuevo: words a nivel raiz
++    con_words_raiz_vacio = 0
++    con_recognize = 0       # auto-caption real (recognize_task_id poblado)
++
++    for mat in materials_texts:
++        # Formato viejo: content es JSON string con "words" adentro
++        content_raw = mat.get("content")
++        if isinstance(content_raw, str):
++            try:
++                parsed = json.loads(content_raw)
++                if parsed.get("words"):
++                    con_words_content += 1
++            except (json.JSONDecodeError, AttributeError):
++                pass
++
++        # Formato nuevo: words a nivel raiz del material (arrays paralelos)
++        words_raiz = mat.get("words")
++        if isinstance(words_raiz, dict):
++            textos = words_raiz.get("text") or []
++            # contar solo palabras reales (descartando separadores " ")
++            reales = [t for t in textos if (t or "").strip()]
++            if reales:
++                con_words_raiz += 1
++            else:
++                con_words_raiz_vacio += 1
++
++        if (mat.get("recognize_task_id") or "").strip():
++            con_recognize += 1
++
++    out("")
++    out("Formato de los datos de palabras:")
++    out(f"  - con 'words' dentro de content (formato viejo): {con_words_content}")
++    out(f"  - con 'words' a nivel raiz CON datos (formato nuevo): {con_words_raiz}")
++    out(f"  - con 'words' a nivel raiz VACIO: {con_words_raiz_vacio}")
++    out(f"  - con recognize_task_id (auto-caption real): {con_recognize}")
++
++    # Tracks
++    out("")
++    out("Tracks del draft:")
++    tracks = draft.get("tracks", []) or []
++    tracks_texto_auto = 0
++    for i, t in enumerate(tracks):
++        tipo = t.get("type", "?")
++        nombre = t.get("name", "") or "(sin nombre)"
++        n = len(t.get("segments", []) or [])
++        out(f"  [{i}] tipo={tipo} nombre={nombre!r} segmentos={n}")
++        if tipo == "text" and str(t.get("name", "")).startswith("AUTO_"):
++            tracks_texto_auto += 1
++
++    # Conclusion accionable
++    out("")
++    out("=" * 50)
++    hay_datos = con_words_content > 0 or con_words_raiz > 0
++    if hay_datos:
++        out("✅ SI hay datos de auto-caption en el draft.")
++        if tracks_texto_auto > 0:
++            out(f"   Tambien hay {tracks_texto_auto} track(s) AUTO_ ya generados")
++            out("   (resultado de una corrida anterior; se limpian solos).")
++        out("   Si el generador igual dio 0, puede ser un tema de parseo:")
++        out("   guarda este reporte para revisar.")
++    else:
++        out("❌ NO hay datos de auto-caption procesables en el draft.")
++        if con_words_raiz_vacio > 0:
++            out(f"   Hay {con_words_raiz_vacio} materiales de texto pero con")
++            out("   'words' VACIO -- el auto-caption se genero sin reconocer voz,")
++            out("   o se perdio en una corrida anterior.")
++        out("")
++        out("   QUE HACER:")
++        out("   1. Abri el proyecto en CapCut.")
++        out("   2. Genera los Subtitulos automaticos sobre el clip de video.")
++        out("   3. Guarda (Ctrl+S) y CERRA CapCut por completo.")
++        out("   4. Volve a analizar.")
++    out("=" * 50)
++
++    return "\n".join(lineas)
++
++
++def _main_cli():
++    """Permite correrlo desde linea de comandos:
++        python -m utils.diagnostico <ruta_al_draft_content.json>
++    """
++    import sys
++
++    if len(sys.argv) < 2:
++        print("Uso: python -m utils.diagnostico <ruta_al_draft_content.json>")
++        sys.exit(1)
++    print(diagnosticar_draft(sys.argv[1]))
++
++
++if __name__ == "__main__":
++    _main_cli()
+diff --git a/utils/mensajes.py b/utils/mensajes.py
+new file mode 100644
+index 0000000..d6517cc
+--- /dev/null
++++ b/utils/mensajes.py
+@@ -0,0 +1,192 @@
++"""
++Traduce resultados de analisis y errores tecnicos a mensajes claros y
++ACCIONABLES en espanol, para que el usuario sepa exactamente que hacer sin
++tener que pedir ayuda externa.
++
++Este modulo es la clave para que el repo sea autosuficiente: cada situacion
++problematica conocida (0 oraciones, CapCut abierto, draft sin datos, etc.)
++tiene aca un mensaje que explica QUE paso y QUE hacer al respecto, en vez
++de un error tecnico crudo.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional
++
++
++@dataclass
++class Diagnostico:
++    """Resultado de interpretar el estado de un draft.
++
++    nivel: 'ok' | 'aviso' | 'error'
++    titulo: linea corta (que paso)
++    pasos: instrucciones concretas (que hacer), lista de strings
++    puede_continuar: si el usuario puede seguir al paso de generar
++    """
++    nivel: str
++    titulo: str
++    pasos: list
++    puede_continuar: bool
++
++
++def interpretar_analisis(result: dict) -> Diagnostico:
++    """Convierte el dict de DraftManager.analyze() en un Diagnostico
++    accionable.
++
++    Cubre los casos reales que mas confundieron en la practica:
++    - 0 oraciones procesables -> falta el auto-caption nativo.
++    - Hay tracks AUTO_ residuales -> corrida anterior, se van a limpiar.
++    - Todo OK -> listo para generar.
++    """
++    procesables = result.get("cantidad_oraciones_procesables", 0)
++    ya_estiladas = result.get("cantidad_oraciones_ya_estiladas", 0)
++    residuales_texto = result.get("tracks_residuales_texto", []) or []
++    residuales_audio = result.get("tracks_residuales_audio", []) or []
++
++    # ── Caso 1: no hay nada que procesar ─────────────────────────────────
++    if procesables == 0:
++        # Distinguir entre "ya estaba todo estilizado" y "no hay
++        # auto-caption en absoluto", porque la accion es distinta.
++        if ya_estiladas > 0:
++            return Diagnostico(
++                nivel="aviso",
++                titulo="Este proyecto ya parece tener subtitulos estilizados.",
++                pasos=[
++                    "No se encontro auto-caption nativo SIN editar para procesar.",
++                    f"Hay {ya_estiladas} oracion(es) que ya tienen estilo aplicado.",
++                    "Si queres regenerar desde cero: en CapCut, borra los",
++                    "subtitulos actuales, volve a generar los Subtitulos",
++                    "automaticos, guarda, cerra CapCut y volve a analizar.",
++                ],
++                puede_continuar=False,
++            )
++        return Diagnostico(
++            nivel="error",
++            titulo="Este proyecto no tiene subtitulos automaticos para procesar.",
++            pasos=[
++                "1. Abri este proyecto en CapCut.",
++                "2. Clic derecho sobre el clip de video -> 'Subtitulos",
++                "   automaticos' (o el boton de Captions/Subtitulos).",
++                "3. Espera a que termine de reconocer la voz.",
++                "4. Guarda el proyecto (Ctrl+S).",
++                "5. CERRA CapCut por completo.",
++                "6. Volve aca y presiona 'Analizar' de nuevo.",
++            ],
++            puede_continuar=False,
++        )
++
++    # ── Caso 2: hay datos, pero quedan tracks residuales de antes ────────
++    pasos_ok = [
++        f"Se encontraron {procesables} oraciones listas para procesar.",
++    ]
++    if residuales_texto or residuales_audio:
++        total_res = len(residuales_texto) + len(residuales_audio)
++        pasos_ok.append(
++            f"Hay {total_res} track(s) de una corrida anterior; se van a "
++            "limpiar automaticamente antes de generar (no te preocupes)."
++        )
++
++    return Diagnostico(
++        nivel="ok",
++        titulo="Todo listo para generar.",
++        pasos=pasos_ok,
++        puede_continuar=True,
++    )
++
++
++def interpretar_error(exc: Exception) -> Diagnostico:
++    """Convierte una excepcion tecnica en un mensaje accionable.
++
++    No intenta cubrir todo: traduce los errores conocidos y para el resto
++    da un mensaje generico pero util (con el texto tecnico al final por si
++    hace falta investigar).
++    """
++    texto = str(exc)
++    tipo = type(exc).__name__
++
++    # Archivo no encontrado / ruta mal
++    if isinstance(exc, FileNotFoundError) or "No es un archivo" in texto:
++        return Diagnostico(
++            nivel="error",
++            titulo="No se encontro el archivo del proyecto.",
++            pasos=[
++                "El draft_content.json no existe en la ruta indicada.",
++                "Volve a elegir el proyecto de la lista, o verifica que el",
++                "proyecto siga existiendo en CapCut.",
++            ],
++            puede_continuar=False,
++        )
++
++    # JSON corrupto / estructura invalida
++    if "JSON" in texto or "draft de CapCut" in texto or tipo == "InvalidDraftError":
++        return Diagnostico(
++            nivel="error",
++            titulo="El archivo del proyecto esta dañado o incompleto.",
++            pasos=[
++                "El draft_content.json no se pudo leer como un proyecto valido.",
++                "Abri el proyecto en CapCut, guardalo de nuevo (Ctrl+S),",
++                "cerra CapCut y volve a intentar.",
++                "Si sigue fallando, puede que el proyecto este corrupto en CapCut.",
++            ],
++            puede_continuar=False,
++        )
++
++    # Archivo demasiado grande
++    if "demasiado grande" in texto:
++        return Diagnostico(
++            nivel="error",
++            titulo="El archivo del proyecto es demasiado grande.",
++            pasos=[texto],
++            puede_continuar=False,
++        )
++
++    # Generico
++    return Diagnostico(
++        nivel="error",
++        titulo="Ocurrio un error inesperado.",
++        pasos=[
++            "No se pudo completar la operacion.",
++            f"Detalle tecnico: {tipo}: {texto}",
++            "Si el problema persiste, usa el boton 'Diagnosticar' para",
++            "ver el estado interno del proyecto.",
++        ],
++        puede_continuar=False,
++    )
++
++
++def aviso_capcut_abierto(esta_corriendo: Optional[bool]) -> Optional[Diagnostico]:
++    """Devuelve un Diagnostico de aviso si CapCut esta (o podria estar)
++    abierto. Devuelve None si es seguro continuar.
++
++    Args:
++        esta_corriendo: True / False / None (no se sabe), tal como lo
++                        devuelve capcut_projects.capcut_esta_corriendo().
++    """
++    if esta_corriendo is True:
++        return Diagnostico(
++            nivel="error",
++            titulo="CapCut esta ABIERTO ahora mismo.",
++            pasos=[
++                "Si genero los subtitulos con CapCut abierto, al cerrarse",
++                "CapCut va a SOBREESCRIBIR el resultado y se pierde todo.",
++                "",
++                "1. Cerra CapCut por completo.",
++                "2. Verifica en el Administrador de Tareas que no quede",
++                "   ningun proceso 'CapCut' corriendo.",
++                "3. Volve a intentar.",
++            ],
++            puede_continuar=False,
++        )
++    if esta_corriendo is None:
++        return Diagnostico(
++            nivel="aviso",
++            titulo="No se pudo verificar si CapCut esta cerrado.",
++            pasos=[
++                "Por las dudas, asegurate vos mismo de que CapCut este",
++                "completamente cerrado antes de generar (incluido cualquier",
++                "proceso en segundo plano en el Administrador de Tareas).",
++            ],
++            puede_continuar=True,
++        )
++    return None

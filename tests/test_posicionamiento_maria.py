@@ -183,7 +183,16 @@ class TestPalabraLargaNoInvadeColumnaOpuestaEnOverlap(unittest.TestCase):
         self.engine.ancla_derecha = 0.20
         self.engine.ancho_por_caracter = 0.15
 
-    def test_reservamos_no_invade_ninguna_columna(self):
+    def test_reservamos_se_reduce_pero_respeta_piso_minimo_de_legibilidad(self):
+        """Pedido explícito del usuario (tras ver 'encontráselo' reducida a
+        un tamaño casi ilegible): nunca reducir una palabra larga por debajo
+        de PISO_FACTOR_REDUCCION (0.7), aunque eso signifique que palabras
+        MUY largas (10+ letras como "reservamos") puedan volver a invadir
+        la columna opuesta en diálogo simultáneo. Es un trade-off consciente
+        elegido por el usuario: legibilidad de la palabra individual por
+        sobre evitar el solape total en el peor caso. Este test verifica el
+        piso, no la ausencia de invasión (eso ya no se garantiza al 100%
+        para palabras de 10+ letras con el piso activo)."""
         oracion1 = [{"word": "reservamos", "start_us": 45033333, "end_us": 45700000}]
         oracion2 = [
             {"word": "lo", "start_us": 44900000, "end_us": 45100000},
@@ -198,11 +207,10 @@ class TestPalabraLargaNoInvadeColumnaOpuestaEnOverlap(unittest.TestCase):
         posiciones = self.engine._calcular_posiciones(bloques, [])
         x, _y, factor = posiciones["0_0_0"]
 
-        ancho_base = (len("reservamos") * self.engine.ancho_por_caracter) / 2
-        ancho_real = ancho_base * factor
-
-        self.assertGreater(x - ancho_real, -0.20, "invade la columna izquierda")
-        self.assertLess(x + ancho_real, 0.20, "invade la columna derecha")
+        # El piso es 0.7 -- nunca debe reducirse mas alla de eso.
+        self.assertGreaterEqual(factor, 0.7)
+        # Sigue centrada en 0 (no se mueve a un lado u otro).
+        self.assertEqual(x, 0.0)
 
 
 class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
@@ -220,10 +228,40 @@ class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
         self.engine.ancla_derecha = 0.20
         self.engine.ancho_por_caracter = 0.15
 
-    def test_palabras_corta_y_larga_en_misma_columna_comparten_borde(self):
-        # "de" (2 letras, corta) y "transferible"-like word en la misma
-        # columna (ambas en posicion par, i=0 y i=2) deben alinear su
-        # borde izquierdo, no su centro.
+    def test_palabras_cortas_no_se_amontonan_cerca_del_centro(self):
+        """Regresión de un bug introducido por una primera implementación
+        de "alineado por borde": usar el ancho COMPLETO de la palabra como
+        offset (x = borde + ancho_palabra) hacía que el centro se disparara
+        según el largo real -- una palabra de 3 letras ya desplazaba el
+        centro 0.225, MAS que la distancia del borde al centro de pantalla
+        (0.20), cruzando al lado opuesto. Confirmado con datos reales: "que"
+        terminaba en x=+0.025 en vez de cerca de la columna -0.20, y la
+        mayoría de las palabras cortas del video real quedaban amontonadas
+        entre ±0.10 del centro en vez de repartidas en las dos columnas
+        (visible en captura real: "voy", "listo", "que" superpuestas).
+
+        El fix usa un offset chico y ACOTADO (no proporcional al ancho
+        completo), así que palabras de cualquier longitud corta/media deben
+        quedar razonablemente cerca de su ancla (no amontonadas en ±0.10)."""
+        for palabra in ["que", "voy", "listo", "no", "por"]:
+            oracion = [{"word": palabra, "start_us": 0, "end_us": 100_000}]
+            bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
+            posiciones = self.engine._calcular_posiciones(bloques, [])
+            x, _y, _factor = posiciones["0_0_0"]
+            # ancla_izquierda=-0.20; el resultado debe quedar razonablemente
+            # cerca de la columna, no amontonado en el 50% central de la
+            # pantalla (-0.10 a +0.10).
+            self.assertLess(
+                x, -0.10,
+                f"'{palabra}' en x={x:.3f}, demasiado cerca del centro (columna esperada cerca de -0.20)",
+            )
+
+    def test_palabras_de_distinto_largo_en_misma_columna_quedan_cerca(self):
+        # "de" (2 letras, corta) y una palabra mas larga en la misma
+        # columna (ambas en posicion par, i=0 y i=2) deben quedar
+        # razonablemente cerca entre si -- no es alineado de borde EXACTO
+        # (eso causaba el bug de amontonamiento, ver test de arriba), pero
+        # tampoco deben volver a estar tan lejos como con centro fijo puro.
         oracion = [
             {"word": "de", "start_us": 0, "end_us": 100_000},
             {"word": "siete", "start_us": 100_000, "end_us": 200_000},
@@ -232,19 +270,9 @@ class TestAlineadoPorBordeIzquierdo(unittest.TestCase):
         bloques = [{"idx_oracion": 0, "palabras": oracion, "es_overlap": False}]
         posiciones = self.engine._calcular_posiciones(bloques, [])
 
-        ancho_por_caracter = self.engine.ancho_por_caracter
-        # "de" (i=0, columna izquierda) y "anios" (i=2, columna izquierda)
         x_de, _, _ = posiciones["0_0_0"]
         x_anios, _, _ = posiciones["0_0_2"]
 
-        ancho_de = (len("de") * ancho_por_caracter) / 2
-        ancho_anios = (len("anios") * ancho_por_caracter) / 2
-
-        borde_de = x_de - ancho_de
-        borde_anios = x_anios - ancho_anios
-
-        self.assertAlmostEqual(
-            borde_de, borde_anios, places=4,
-            msg=f"'de' (borde={borde_de:.3f}) y 'anios' (borde={borde_anios:.3f}) "
-                f"no comparten el mismo borde izquierdo",
-        )
+        # Con el offset acotado (max 0.08), ambas caen en el mismo punto
+        # cuando el ancho_palabra de ambas supera la referencia de 3 letras.
+        self.assertAlmostEqual(x_de, x_anios, places=4)

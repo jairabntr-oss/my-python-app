@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 import customtkinter as ctk
 from config import COLORS, settings as app_settings
+from utils.capcut_projects import capcut_esta_corriendo
+from utils.mensajes import aviso_capcut_abierto
 
 
 class Step4Frame(ctk.CTkFrame):
@@ -110,6 +112,18 @@ class Step4Frame(ctk.CTkFrame):
         if not oraciones:
             self._log("❌ No hay oraciones procesables.")
             return
+
+        # CRITICO: no generar si CapCut esta abierto -- al cerrarse,
+        # sobreescribe el draft y se pierde todo el trabajo.
+        estado = capcut_esta_corriendo()
+        aviso = aviso_capcut_abierto(estado)
+        if aviso is not None:
+            for linea in [f"{aviso.titulo}"] + aviso.pasos:
+                self._log(linea)
+            if not aviso.puede_continuar:
+                # CapCut confirmado abierto: frenar aca.
+                return
+            # estado desconocido (None): se avisa pero se deja continuar.
 
         self.run_btn.configure(state="disabled", text="Procesando…")
         self.progress.set(0.1)

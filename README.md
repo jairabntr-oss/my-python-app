@@ -62,23 +62,47 @@ pip install -r requirements.txt
 pip install -e ".[dev]"
 ```
 
-## Uso
+## Uso — Procesar un video nuevo (flujo recomendado)
 
-### Interfaz gráfica
+Todo el flujo se hace desde la interfaz gráfica, sin necesidad de correr
+scripts a mano ni saber qué hace cada uno.
+
 ```bash
 python app.py
 ```
 
-### Script de línea de comandos
-```bash
-python generar_subtitulos_baic_v5.py
-```
-Selecciona el proyecto interactivamente y confirma para generar.
+Pasos dentro de la app:
 
-### Test de integración (dry-run)
+1. **Paso 1 — Proyecto.** La app lista automáticamente tus proyectos de
+   CapCut (el más reciente arriba). Elegí uno del desplegable y presioná
+   **Analizar**.
+   - Si el proyecto **no tiene subtítulos automáticos todavía**, la app te
+     dice exactamente qué hacer (generar los Subtítulos automáticos en
+     CapCut, guardar, cerrar CapCut y volver a analizar).
+   - El botón **🔍 Diagnosticar** muestra un reporte detallado del estado
+     interno del proyecto si algo no cuadra.
+2. **Paso 2 — Estilo.** Confirmá o ajustá el estilo visual.
+3. **Paso 3 — Clicks (opcional).** Activá sonidos de click si los querés.
+4. **Paso 4 — Generar.** Antes de generar, la app **verifica que CapCut
+   esté cerrado** (si está abierto, te avisa, porque al cerrarse
+   sobreescribiría el resultado). Presioná **Generar** y listo.
+
+> ⚠️ **Regla de oro:** CapCut tiene que estar **cerrado** mientras se
+> genera. La app lo verifica, pero conviene cerrarlo vos también desde el
+> Administrador de Tareas si tenés dudas.
+
+### Diagnóstico por línea de comandos (opcional)
+
+Si querés inspeccionar un draft sin abrir la UI:
+
 ```bash
-python test_integration_real.py "C:\ruta\al\draft_content.json" "nombre_del_draft"
+python -m utils.diagnostico "C:\ruta\al\draft_content.json"
 ```
+
+### Scripts de línea de comandos (avanzado / legacy)
+
+Los scripts sueltos (`generar_subtitulos_baic_v5.py`, etc.) siguen
+existiendo para casos puntuales, pero el flujo recomendado es la UI.
 
 ## Ejecutar pruebas
 ```bash

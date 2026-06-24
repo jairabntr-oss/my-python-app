@@ -92,12 +92,13 @@ class TestLayoutConfig(unittest.TestCase):
     """Tests para layout configurable de posiciones."""
 
     def test_anclas_configurables_se_aplican_en_posiciones(self):
-        """Las anclas representan el BORDE de alineacion (pedido del
-        usuario: palabras de una misma columna deben compartir el mismo
-        borde izquierdo/derecho, no el mismo centro fijo -- antes una
-        palabra corta y una larga centradas en el mismo punto arrancaban en
-        bordes distintos, viendose "torcidas"). El centro real que CapCut
-        necesita se deriva sumando/restando medio ancho de la palabra."""
+        """Las anclas configuran la zona/columna de cada palabra. El offset
+        de alineacion (ver _calcular_posiciones) es chico y ACOTADO -- no
+        proporcional al ancho completo de la palabra -- para evitar el bug
+        real encontrado: usar el ancho completo como offset desplazaba el
+        centro de palabras cortas/medias mas alla del propio centro de
+        pantalla, amontonando todo cerca de x=0 en vez de cerca de la
+        columna configurada."""
         engine = SubtitleEngine(
             script=None,
             profile={"ancla_izquierda": -0.1, "ancla_derecha": 0.3, "ancho_por_caracter": 0.05},
@@ -112,13 +113,10 @@ class TestLayoutConfig(unittest.TestCase):
 
         posiciones = engine._calcular_posiciones(bloques, pares_overlap=[])
         # "hola": 4 letras, ancho_por_caracter=0.05 -> ancho_palabra=0.10.
-        # Columna izquierda (i=0): borde_izquierdo=-0.1 -> centro = borde +
-        # ancho_palabra = -0.1 + 0.10 = 0.0. El BORDE real (centro -
-        # ancho_palabra) debe coincidir con la ancla configurada.
+        # ancho_referencia (3 letras) = 0.075; offset_borde = min(0.10,
+        # 0.075, 0.08) = 0.075. x = ancla_izquierda + offset = -0.1+0.075.
         x, _y, _factor = posiciones["0_0_0"]
-        ancho_palabra = (len("hola") * 0.05) / 2
-        borde_izquierdo_real = x - ancho_palabra
-        self.assertAlmostEqual(borde_izquierdo_real, -0.1)
+        self.assertAlmostEqual(x, -0.025)
 
 
 class TestSeSolapa(unittest.TestCase):

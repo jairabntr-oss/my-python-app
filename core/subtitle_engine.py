@@ -294,18 +294,35 @@ class SubtitleEngine:
                     # usuario tras ver su estilo manual de referencia: "de"
                     # y "7 años" en lineas consecutivas de la misma columna
                     # no compartian el mismo eje porque antes se centraba
-                    # cada palabra en la MISMA x sin importar su ancho (una
-                    # palabra corta y una larga centradas en el mismo punto
-                    # arrancan en bordes distintos). Ahora ancla_izquierda /
-                    # ancla_derecha representan el BORDE, y el centro real
-                    # que CapCut necesita se calcula sumando medio ancho.
+                    # cada palabra en la MISMA x sin importar su ancho.
+                    #
+                    # OJO -- intento anterior (BUG, revertido): usar el
+                    # ancho_palabra COMPLETO como offset (x = borde +
+                    # ancho_palabra) hacia que el centro se disparara segun
+                    # el largo real de la palabra. ancho_palabra esta en la
+                    # escala calibrada para que una palabra de 10 letras mida
+                    # ~75% de pantalla -- a esa escala, hasta una palabra de
+                    # 3 letras ya desplaza el centro 0.225, MAS que la propia
+                    # distancia del borde al centro de pantalla (0.20),
+                    # cruzando al lado opuesto. Confirmado con datos reales:
+                    # "que" (3 letras) terminaba en x=+0.025 en vez de cerca
+                    # de la columna -0.20, y la mayoria de las palabras
+                    # cortas del video quedaban amontonadas entre ±0.10 del
+                    # centro en vez de repartidas en las dos columnas.
+                    #
+                    # Fix: el offset de alineacion debe ser chico y ACOTADO,
+                    # no escalar con el ancho completo de la palabra. Se usa
+                    # medio ancho de una palabra de 3 letras como referencia
+                    # (un valor representativo de "palabra corta tipica"),
+                    # capeado a un maximo absoluto para que nunca empuje la
+                    # palabra mas alla de medio camino hacia el centro.
+                    ancho_referencia = (3 * ancho_por_caracter) / 2
+                    offset_borde = min(ancho_palabra, ancho_referencia, 0.08)
                     borde = ancla_izquierda if i % 2 == 0 else ancla_derecha
                     if i % 2 == 0:
-                        x = borde + ancho_palabra  # borde + (2*ancho_palabra)/2
+                        x = borde + offset_borde
                     else:
-                        # columna derecha: el "borde" alineado es el DERECHO,
-                        # para que el efecto de columna sea simetrico
-                        x = borde - ancho_palabra
+                        x = borde - offset_borde
 
                 # RADIO_SEGURO_PALABRA_LARGA: con las columnas en ±0.20, una
                 # palabra larga centrada no debe medir mas de ~0.18 de radio
@@ -324,7 +341,20 @@ class SubtitleEngine:
                     # como mas margen de seguridad contra las columnas en
                     # ±0.20 en vez de un numero de tamano de fuente fijo.
                     RADIO_SEGURO = 0.16
+                    # PISO_FACTOR_REDUCCION: limite minimo de reduccion
+                    # (70% del tamano normal). Sin este piso, palabras MUY
+                    # largas (12+ letras) se reducian hasta ser casi
+                    # ilegibles -- confirmado con un caso real: "encontráselo"
+                    # (12 letras) calculaba factor=0.178 (size final ≈1.78
+                    # sobre un style_size=10), visualmente diminuta al lado
+                    # de palabras cortas en tamano normal. Con el piso, la
+                    # palabra puede seguir ocupando algo mas de espacio del
+                    # ideal (no se garantiza al 100% que nunca toque la
+                    # columna opuesta en casos extremos), pero nunca se
+                    # vuelve ilegible. Pedido explicito del usuario.
+                    PISO_FACTOR_REDUCCION = 0.7
                     factor_reduccion = min(1.0, RADIO_SEGURO / ancho_palabra) if ancho_palabra > 0 else 1.0
+                    factor_reduccion = max(factor_reduccion, PISO_FACTOR_REDUCCION)
                     ancho_palabra *= factor_reduccion
                     # Centrar en x=0 (no en la mitad de la ancla): el
                     # RADIO_SEGURO ya esta calculado para que, centrada en 0,
