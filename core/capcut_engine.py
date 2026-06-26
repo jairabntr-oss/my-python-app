@@ -45,8 +45,7 @@ class CapcutEngine:
         
         try:
             draft_folder = self.cc.DraftFolder(str(self.get_drafts_folder()))
-            projects = draft_folder.projects
-            return [p.name for p in projects]
+            return draft_folder.list_drafts()
         except Exception as e:
             print(f"❌ Error listando proyectos: {e}")
             return []

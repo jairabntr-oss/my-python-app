@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "created_at": "2026-06-21T00:00:00",
-  "updated_at": "2026-06-21T00:00:00",
+  "updated_at": "2026-06-26T14:18:18.679812",
   "text_format": {
     "font": "Poppins-Bold",
     "font_id": "7312373689708712449",
@@ -35,7 +35,26 @@
     "drafts_folder": "C:\\Users\\user2\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft",
     "cache_folder": "C:\\Users\\user2\\AppData\\Local\\CapCut\\User Data\\Cache"
   },
-  "projects": {},
+  "projects": {
+    "entrv señores - clip1_serge": {
+      "config": {
+        "track_name": "AUTO_subtitles",
+        "total_words": 188,
+        "settings_version": "1.0"
+      },
+      "last_used": "2026-06-25T12:10:41.304342",
+      "version": 1
+    },
+    "entrv señores - clip2_fantastica": {
+      "config": {
+        "track_name": "AUTO_subtitles",
+        "total_words": 206,
+        "settings_version": "1.0"
+      },
+      "last_used": "2026-06-26T14:18:18.679812",
+      "version": 1
+    }
+  },
   "editing_history": [],
   "auto_suggestions": true,
   "last_used": null

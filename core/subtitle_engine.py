@@ -45,8 +45,20 @@ class SubtitleEngine:
     # estos pasos y min_dist_y, porque dependen del alto REAL del texto en
     # pantalla (el bug de "mariaaa baic" fue justamente size=30 -> texto 3x
     # mas grande -> desbordaba este espaciado y se amontonaba).
-    PASO_Y_CORTO = 0.045   # Palabras 1-3 letras (pedido: "achicar distancia entre lineas")
-    PASO_Y_LARGO = 0.09    # Palabras 8+ letras
+    #
+    # BUG REAL ENCONTRADO Y CORREGIDO (clip2_fantastica, "entrv señores"):
+    # un pedido anterior de "achicar distancia entre lineas" bajo estos
+    # valores a 0.045/0.09, por DEBAJO del min_dist_y de colision (0.04 en
+    # ese momento, ahora 0.11 - ver _calcular_posiciones). Como el paso
+    # normal ya caia muy cerca del umbral de "choque", el sistema
+    # anti-colision se disparaba en casi cada palabra, empujando todo hacia
+    # arriba sin usar el resto del rango disponible (-0.4 a 0.4) - eso es lo
+    # que se vio en las capturas reales: texto apelmazado en una columna
+    # angosta, muy arriba de pantalla en vez de centrado. Subido a valores
+    # >= min_dist_y para que el AVANCE NORMAL ya evite colisiones por si
+    # solo, sin depender tanto del empuje de emergencia.
+    PASO_Y_CORTO = 0.12   # Palabras 1-3 letras
+    PASO_Y_LARGO = 0.16   # Palabras 8+ letras
 
     # Prefijo de los tracks de subtitulos (se crean varios para no solapar
     # en el tiempo: equivalente a los AUTO_pos_N del sistema original)
@@ -251,7 +263,13 @@ class SubtitleEngine:
                 y_zona_min, y_zona_max = (-0.4, -0.05) if es_overlap_segundo else (0.05, 0.4)
                 zona = "abajo" if es_overlap_segundo else "arriba"
             else:
-                y_zona_min, y_zona_max = -0.4, 0.4
+                # Zona Y para bloques NORMALES (sin dialogo simultaneo):
+                # bajada a la mitad inferior de pantalla (antes -0.4 a 0.4,
+                # centrada) por pedido especifico del usuario para este
+                # video - el texto se veia a la altura del pecho/cara de
+                # las personas en cuadro, y lo prefiere a la altura de los
+                # pantalones, sin llegar al borde inferior real (-0.5).
+                y_zona_min, y_zona_max = -0.45, -0.05
                 zona = "normal"
 
             palabras_bloque = bloque["palabras"]
@@ -267,7 +285,7 @@ class SubtitleEngine:
                     # visible cuando arranca este -> heredar sus cajas para
                     # que el anti-colision no se solape con el
                     cajas_ocupadas = list(cajas_anterior)
-            y_actual = y_zona_min + 0.08
+            y_actual = y_zona_max - 0.08
 
             for i, palabra_data in enumerate(bloque["palabras"]):
                 palabra = palabra_data["word"]
@@ -393,10 +411,20 @@ class SubtitleEngine:
                         min_dist_x = (ancho_palabra + cw) / 2 + 0.02
                         # min_dist_y calibrado para STYLE_SIZE=10 + scale
                         # ~3.037 (config validada en "entrv fede baic").
-                        # Debe ser menor que PASO_Y_CORTO para no reempujar
-                        # palabras que el avance normal ya separo bien. Si se
-                        # cambia STYLE_SIZE, recalibrar este valor.
-                        min_dist_y = 0.04
+                        #
+                        # BUG REAL ENCONTRADO Y CORREGIDO (clip2_fantastica,
+                        # "entrv señores"): el valor anterior (0.04) era
+                        # insuficiente - medido empiricamente contra los
+                        # pares de palabras simultaneas MAS CERCANOS en el
+                        # draft de "entrv fede baic" ya aprobado
+                        # visualmente por el usuario, el dy real minimo
+                        # nunca bajaba de ~0.11 cuando dx~0. Con 0.04, el
+                        # sistema de colision casi no se disparaba y las
+                        # palabras quedaban demasiado cerca entre si
+                        # (capturas reales: "qué/camioneta/tenés/vos" y
+                        # "una/BJ30/BJ30.3/3000km" pisandose visualmente).
+                        # Si se cambia STYLE_SIZE, recalibrar este valor.
+                        min_dist_y = 0.11
 
                         if distancia_x < min_dist_x and distancia_y < min_dist_y:
                             choca = True
@@ -405,10 +433,14 @@ class SubtitleEngine:
                     if not choca:
                         break
 
-                    # BUG corregido: antes restaba (empujaba hacia el techo
-                    # de la zona, amontonando todo en un punto). El zigzag
-                    # fluye hacia ABAJO en pantalla -> hay que sumar.
-                    y_actual += 0.05
+                    # CORREGIDO: en pycapcut/CapCut, transform_y POSITIVO es
+                    # ARRIBA en pantalla (confirmado con prueba real: un
+                    # segmento con transform_y=-0.5 se serializa tal cual y
+                    # CapCut lo coloca abajo, como hacen los subtitulos
+                    # estandar). El recorrido visual hacia ABAJO se logra
+                    # RESTANDO, no sumando -- al reves de lo que decia el
+                    # comentario anterior.
+                    y_actual -= 0.05
                     intento += 1
 
                 palabra_id = f"{b_idx}_{bloque['idx_oracion']}_{i}"
@@ -435,10 +467,11 @@ class SubtitleEngine:
                 cajas_ocupadas.append((x, y_guardado, ancho_palabra))
 
                 paso = self.PASO_Y_CORTO if len(palabra) <= 3 else self.PASO_Y_LARGO
-                y_actual += paso
-                # clamp contra el PISO de la zona (y_zona_max es el limite de
-                # abajo en este sistema, ya que Y crece hacia abajo en pantalla)
-                y_actual = min(y_actual, y_zona_max - 0.08)
+                y_actual -= paso
+                # clamp contra el PISO de la zona: y_zona_min es el limite de
+                # abajo en pantalla, ya que en pycapcut Y crece hacia ARRIBA
+                # (corregido - antes el comentario decia lo contrario).
+                y_actual = max(y_actual, y_zona_min + 0.08)
 
             # guardar el estado de este bloque para que el SIGUIENTE bloque
             # en la misma zona sepa que posiciones evitar si todavia se
@@ -607,12 +640,55 @@ class SubtitleEngine:
 
         # 1) construir todos los segmentos con timing ACUMULATIVO
         items = []  # (start_us, end_us, palabra, x, y, factor_reduccion)
+        # Margen de seguridad para que un bloque extendido nunca llegue a
+        # pisar EXACTAMENTE el instante en que arranca el siguiente (deja
+        # un respiro de 1 frame aproximado en vez de un corte a cero).
+        MARGEN_SEGURIDAD_US = 16_000  # ~1 frame a 60fps
+
         for b_idx, bloque in enumerate(bloques):
             palabras = bloque["palabras"]
             if not palabras:
                 continue
-            # el bloque entero permanece hasta que termina su ultima palabra
-            block_end = int(palabras[-1]["end_us"])
+            # BUG REAL ENCONTRADO Y CORREGIDO (clip2_fantastica): antes,
+            # el bloque permanecia visible SOLO hasta que terminaba su
+            # propia ultima palabra (palabras[-1]["end_us"]). Cuando una
+            # oracion larga se corta en bloques de maximo 5 palabras y
+            # queda un "resto" de 1-2 palabras sueltas, ese bloque
+            # residual puede durar muy poco en pantalla (caso real: un
+            # "no" con apenas 33ms de duracion visible, casi
+            # imperceptible) si el siguiente bloque real arranca
+            # enseguida en el habla. Pedido explicito del usuario: cada
+            # bloque debe extenderse hasta justo antes de que arranque
+            # el bloque SIGUIENTE (sin importar el tamaño de ninguno de
+            # los dos), no cortarse en su propio fin de palabra. Esto
+            # elimina los huecos de "pantalla sin texto" entre bloques
+            # consecutivos.
+            #
+            # Proteccion para dialogo simultaneo: si este bloque y el
+            # siguiente estan en ZONAS DISTINTAS de pantalla (uno
+            # "arriba" de un par en overlap y el otro "abajo", o uno es
+            # overlap y el otro no), no se extiende - ambos pueden estar
+            # mostrandose a la vez legitimamente y extender uno "comeria"
+            # el tiempo del otro sin necesidad real.
+            fin_propio = int(palabras[-1]["end_us"])
+            siguiente = bloques[b_idx + 1] if b_idx + 1 < len(bloques) else None
+            misma_zona = (
+                siguiente is not None
+                and bloque.get("es_overlap") == siguiente.get("es_overlap")
+                and (
+                    not bloque.get("es_overlap")
+                    or bloque["idx_oracion"] == siguiente["idx_oracion"]
+                )
+            )
+            if siguiente is not None and siguiente["palabras"] and misma_zona:
+                inicio_siguiente = int(siguiente["palabras"][0]["start_us"])
+                if inicio_siguiente > fin_propio:
+                    block_end = max(inicio_siguiente - MARGEN_SEGURIDAD_US, fin_propio)
+                else:
+                    block_end = fin_propio
+            else:
+                block_end = fin_propio
+
             for i, palabra_data in enumerate(palabras):
                 start_us = int(palabra_data["start_us"])
                 end_us = max(block_end, start_us + 1_000)  # acumulativo
