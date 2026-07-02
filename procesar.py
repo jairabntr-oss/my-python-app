@@ -37,7 +37,7 @@ from core.logger import logger
 SONIDO_CLICK_DEFAULT = PATHS["assets"] / "click_sonido.mp3"
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# --------- Helpers ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def _ruta_draft_json(engine: CapcutEngine, nombre: str) -> Path:
     """Ruta al draft_content.json real del proyecto en CapCut."""
@@ -70,7 +70,7 @@ def _aviso_capcut():
     print("    (Si esta abierto, va a pisar los cambios al cerrarse.)")
 
 
-# ─── Acciones ────────────────────────────────────────────────────────────────
+# --------- Acciones ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def accion_listar(_args) -> int:
     engine = CapcutEngine()
@@ -222,39 +222,16 @@ def accion_clicks(args, ya_backupeado: bool = False) -> int:
 
 
 def accion_cortes(args) -> int:
-    """Sugiere puntos de corte: silencios largos + cambios de escena,
-    cruzados con las oraciones del auto-caption para no cortar frases."""
+    """Sugiere puntos de corte. Fuente PRINCIPAL: pausas en el habla segun
+    los timestamps del auto-caption (inmune al ruido ambiente). Fuentes
+    secundarias: silencios de audio y cambios de escena (ffmpeg)."""
     from utils.analisis_video import (
-        ffmpeg_disponible, video_desde_draft,
-        detectar_silencios, detectar_cambios_escena, clasificar_silencios,
+        ffmpeg_disponible, video_desde_draft, detectar_silencios,
+        detectar_cambios_escena, clasificar_silencios, detectar_pausas_habla,
     )
-
-    if not ffmpeg_disponible():
-        print("[X] ffmpeg no esta instalado o no esta en el PATH.")
-        print("    Instalalo con:  winget install Gyan.FFmpeg")
-        print("    y despues CERRA y reabri esta consola.")
-        return 1
 
     engine = CapcutEngine()
     ruta = _verificar_draft_existe(engine, args.draft)
-
-    video = Path(args.video) if args.video else video_desde_draft(ruta)
-    if video is None or not video.is_file():
-        print("[X] No pude encontrar el archivo de video del draft.")
-        print("    Pasalo a mano con:  --video \"C:\\ruta\\al\\video.mp4\"")
-        return 1
-    print(f"Video: {video}")
-
-    print("Analizando audio (silencios)...")
-    silencios = detectar_silencios(
-        video, umbral_db=args.umbral_db, min_duracion_seg=args.min_silencio
-    )
-    print("Analizando video (cambios de escena)...")
-    escenas = detectar_cambios_escena(video)
-
-    # Cruzar con oraciones del auto-caption para clasificar seguridad
-    oraciones = engine.extract_captions_from_draft(args.draft) or []
-    silencios = clasificar_silencios(silencios, oraciones)
 
     def fmt(seg: float) -> str:
         m, s = divmod(seg, 60)
@@ -265,31 +242,79 @@ def accion_cortes(args) -> int:
     print(f"SUGERENCIAS DE CORTE: {args.draft}")
     print("=" * 62)
 
+    # ------ Fuente principal: pausas del habla (transcripcion) ------------------------------------------
+    oraciones = engine.extract_captions_from_draft(args.draft) or []
+    if oraciones:
+        manager = DraftManager(ruta)
+        manager.load()
+        duracion = manager.analyze()["duracion_video_seg"]
+
+        pausas = detectar_pausas_habla(
+            oraciones, min_pausa_seg=args.min_silencio,
+            duracion_video_seg=duracion,
+        )
+        etiquetas = {
+            "inicio_video": "aire antes de la 1ra palabra",
+            "entre_frases": "nadie habla",
+            "fin_video": "aire despues de la ultima palabra",
+        }
+        print(f"\nPAUSAS EN EL HABLA ({len(pausas)}) - desde la transcripcion,")
+        print("inmune al ruido de fondo. Cortes seguros entre frases:")
+        for p in pausas:
+            print(f"  {fmt(p['inicio'])} -> {fmt(p['fin'])}  "
+                  f"({p['duracion']:.1f}s, {etiquetas[p['tipo']]})")
+        if not pausas:
+            print(f"  (ninguna pausa >= {args.min_silencio}s - habla continua)")
+        total = sum(p["duracion"] for p in pausas)
+        print(f"  Total recortable: ~{total:.1f}s")
+    else:
+        print("\n[!] Este draft no tiene auto-caption sin editar, asi que no")
+        print("    puedo detectar pausas desde la transcripcion. Corre el")
+        print("    auto-caption de CapCut primero (o restaura un backup).")
+
+    # ------ Fuentes secundarias: ffmpeg (opcional) ------------------------------------------------------------------------------
+    if args.solo_habla:
+        print("=" * 62)
+        return 0
+
+    if not ffmpeg_disponible():
+        print("\n(ffmpeg no instalado: salteo silencios de audio y escenas.")
+        print(" Instalalo con: winget install Gyan.FFmpeg)")
+        print("=" * 62)
+        return 0
+
+    video = Path(args.video) if args.video else video_desde_draft(ruta)
+    if video is None or not video.is_file():
+        print("\n(No encontre el video del draft: salteo analisis de audio/")
+        print(" escenas. Pasalo con --video si lo queres.)")
+        print("=" * 62)
+        return 0
+
+    print(f"\nVideo: {video}")
+    print("Analizando audio y escenas con ffmpeg...")
+    silencios = clasificar_silencios(
+        detectar_silencios(video, umbral_db=args.umbral_db,
+                           min_duracion_seg=args.min_silencio),
+        oraciones,
+    )
+    escenas = detectar_cambios_escena(video)
+
     seguros = [s for s in silencios if s["seguro"]]
-    riesgosos = [s for s in silencios if not s["seguro"]]
+    print(f"\nSILENCIOS DE AUDIO ({len(silencios)}, {len(seguros)} seguros) - "
+          f"puede dar 0 con ruido ambiente:")
+    for s in silencios:
+        marca = "seguro" if s["seguro"] else "RIESGOSO"
+        print(f"  {fmt(s['inicio'])} -> {fmt(s['fin'])}  "
+              f"({s['duracion']:.1f}s, {marca})")
+    if not silencios:
+        print("  (ninguno - normal en ambientes ruidosos; usa las pausas de arriba)")
 
-    print(f"\nSILENCIOS SEGUROS para cortar ({len(seguros)}) - caen entre frases:")
-    for s in seguros:
-        print(f"  {fmt(s['inicio'])} -> {fmt(s['fin'])}  ({s['duracion']:.1f}s de aire)")
-    if not seguros:
-        print("  (ninguno)")
-
-    print(f"\nSILENCIOS RIESGOSOS ({len(riesgosos)}) - pisan una frase, revisar a oido:")
-    for s in riesgosos:
-        print(f"  {fmt(s['inicio'])} -> {fmt(s['fin'])}  ({s['duracion']:.1f}s)")
-    if not riesgosos:
-        print("  (ninguno)")
-
-    print(f"\nCAMBIOS DE ESCENA ({len(escenas)}) - puntos de corte visualmente naturales:")
+    print(f"\nCAMBIOS DE ESCENA ({len(escenas)}):")
     for t in escenas[:30]:
         print(f"  {fmt(t)}")
-    if len(escenas) > 30:
-        print(f"  ... y {len(escenas) - 30} mas")
     if not escenas:
-        print("  (ninguno)")
+        print("  (ninguno - normal si es una sola toma continua)")
 
-    total_aire = sum(s["duracion"] for s in seguros)
-    print(f"\nSi cortas todos los silencios seguros, el video se acorta ~{total_aire:.1f}s.")
     print("=" * 62)
     return 0
 
@@ -324,7 +349,7 @@ def accion_full(args) -> int:
     return accion_clicks(args, ya_backupeado=True)
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# --------- Main ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -371,6 +396,8 @@ def main() -> int:
                           help="Duracion minima de silencio en seg (default: 1.0)")
     p_cortes.add_argument("--umbral-db", type=int, default=-35, dest="umbral_db",
                           help="Umbral de silencio en dB (default: -35)")
+    p_cortes.add_argument("--solo-habla", action="store_true", dest="solo_habla",
+                          help="Solo pausas desde transcripcion (rapido, sin ffmpeg)")
 
     args = parser.parse_args()
 

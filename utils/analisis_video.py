@@ -96,6 +96,62 @@ def detectar_cambios_escena(video: Path, umbral: float = 0.35) -> List[float]:
     return cambios
 
 
+def detectar_pausas_habla(
+    oraciones: List[List[dict]],
+    min_pausa_seg: float = 0.8,
+    duracion_video_seg: float = 0.0,
+) -> List[dict]:
+    """Pausas en el HABLA usando los timestamps del auto-caption.
+
+    Inmune al ruido ambiente (concesionaria, motor, viento): no mira el
+    nivel de audio, mira cuando NADIE esta diciendo una palabra segun el
+    reconocimiento de voz de CapCut.
+
+    Maneja dialogo superpuesto: recorre todas las palabras de todas las
+    oraciones ordenadas por inicio y solo cuenta pausa cuando el hueco
+    supera el fin de TODO lo dicho hasta ahi (asi dos personas hablando
+    a la vez no generan pausas falsas).
+
+    oraciones: List[List[{word,start_us,end_us}]] (formato del repo).
+    duracion_video_seg: si se pasa, tambien reporta el aire muerto
+    inicial (antes de la primera palabra) y final (despues de la ultima).
+    """
+    palabras = sorted(
+        (w["start_us"] / 1e6, w["end_us"] / 1e6)
+        for o in oraciones for w in o
+    )
+    if not palabras:
+        return []
+
+    pausas = []
+
+    # Aire muerto inicial
+    if palabras[0][0] >= min_pausa_seg:
+        pausas.append({
+            "inicio": 0.0, "fin": palabras[0][0],
+            "duracion": palabras[0][0], "tipo": "inicio_video",
+        })
+
+    fin_actual = palabras[0][1]
+    for ini, fin in palabras[1:]:
+        hueco = ini - fin_actual
+        if hueco >= min_pausa_seg:
+            pausas.append({
+                "inicio": fin_actual, "fin": ini,
+                "duracion": hueco, "tipo": "entre_frases",
+            })
+        fin_actual = max(fin_actual, fin)
+
+    # Aire muerto final
+    if duracion_video_seg and duracion_video_seg - fin_actual >= min_pausa_seg:
+        pausas.append({
+            "inicio": fin_actual, "fin": duracion_video_seg,
+            "duracion": duracion_video_seg - fin_actual, "tipo": "fin_video",
+        })
+
+    return pausas
+
+
 def clasificar_silencios(
     silencios: List[dict],
     oraciones: List[List[dict]],
