@@ -221,6 +221,79 @@ def accion_clicks(args, ya_backupeado: bool = False) -> int:
     return 0
 
 
+def accion_cortes(args) -> int:
+    """Sugiere puntos de corte: silencios largos + cambios de escena,
+    cruzados con las oraciones del auto-caption para no cortar frases."""
+    from utils.analisis_video import (
+        ffmpeg_disponible, video_desde_draft,
+        detectar_silencios, detectar_cambios_escena, clasificar_silencios,
+    )
+
+    if not ffmpeg_disponible():
+        print("[X] ffmpeg no esta instalado o no esta en el PATH.")
+        print("    Instalalo con:  winget install Gyan.FFmpeg")
+        print("    y despues CERRA y reabri esta consola.")
+        return 1
+
+    engine = CapcutEngine()
+    ruta = _verificar_draft_existe(engine, args.draft)
+
+    video = Path(args.video) if args.video else video_desde_draft(ruta)
+    if video is None or not video.is_file():
+        print("[X] No pude encontrar el archivo de video del draft.")
+        print("    Pasalo a mano con:  --video \"C:\\ruta\\al\\video.mp4\"")
+        return 1
+    print(f"Video: {video}")
+
+    print("Analizando audio (silencios)...")
+    silencios = detectar_silencios(
+        video, umbral_db=args.umbral_db, min_duracion_seg=args.min_silencio
+    )
+    print("Analizando video (cambios de escena)...")
+    escenas = detectar_cambios_escena(video)
+
+    # Cruzar con oraciones del auto-caption para clasificar seguridad
+    oraciones = engine.extract_captions_from_draft(args.draft) or []
+    silencios = clasificar_silencios(silencios, oraciones)
+
+    def fmt(seg: float) -> str:
+        m, s = divmod(seg, 60)
+        return f"{int(m):02d}:{s:05.2f}"
+
+    print()
+    print("=" * 62)
+    print(f"SUGERENCIAS DE CORTE: {args.draft}")
+    print("=" * 62)
+
+    seguros = [s for s in silencios if s["seguro"]]
+    riesgosos = [s for s in silencios if not s["seguro"]]
+
+    print(f"\nSILENCIOS SEGUROS para cortar ({len(seguros)}) - caen entre frases:")
+    for s in seguros:
+        print(f"  {fmt(s['inicio'])} -> {fmt(s['fin'])}  ({s['duracion']:.1f}s de aire)")
+    if not seguros:
+        print("  (ninguno)")
+
+    print(f"\nSILENCIOS RIESGOSOS ({len(riesgosos)}) - pisan una frase, revisar a oido:")
+    for s in riesgosos:
+        print(f"  {fmt(s['inicio'])} -> {fmt(s['fin'])}  ({s['duracion']:.1f}s)")
+    if not riesgosos:
+        print("  (ninguno)")
+
+    print(f"\nCAMBIOS DE ESCENA ({len(escenas)}) - puntos de corte visualmente naturales:")
+    for t in escenas[:30]:
+        print(f"  {fmt(t)}")
+    if len(escenas) > 30:
+        print(f"  ... y {len(escenas) - 30} mas")
+    if not escenas:
+        print("  (ninguno)")
+
+    total_aire = sum(s["duracion"] for s in seguros)
+    print(f"\nSi cortas todos los silencios seguros, el video se acorta ~{total_aire:.1f}s.")
+    print("=" * 62)
+    return 0
+
+
 def accion_full(args) -> int:
     """limpiar -> subtitulos -> clicks, con UN solo backup al inicio."""
     engine = CapcutEngine()
@@ -290,6 +363,15 @@ def main() -> int:
     p_full.add_argument("--modo", choices=["2", "3"], default="2")
     p_full.add_argument("--sonido", default=None)
 
+    p_cortes = _con_draft("cortes", "Sugiere puntos de corte (ffmpeg, sin IA)",
+                          con_dry=False)
+    p_cortes.add_argument("--video", help="Ruta al video (default: se busca en el draft)")
+    p_cortes.add_argument("--min-silencio", type=float, default=1.0,
+                          dest="min_silencio",
+                          help="Duracion minima de silencio en seg (default: 1.0)")
+    p_cortes.add_argument("--umbral-db", type=int, default=-35, dest="umbral_db",
+                          help="Umbral de silencio en dB (default: -35)")
+
     args = parser.parse_args()
 
     acciones = {
@@ -299,6 +381,7 @@ def main() -> int:
         "subtitulos": accion_subtitulos,
         "clicks": accion_clicks,
         "full": accion_full,
+        "cortes": accion_cortes,
     }
 
     try:
