@@ -39,3 +39,59 @@ backups/
 .idea/
 .vscode/
 *.swp
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+
+# Linting
+.ruff_cache/
+
+# Logs
+logs/
+*.log
+
+# Backups generados por la app
+backups/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# ── Archivos de trabajo que NO son codigo ──────────────────────────────
+# Drafts de CapCut copiados para debugging (pesan MB y cambian por video)
+draft_*.json
+maria_*.json
+FEDE_*.json
+*_NUEVO.json
+*_REORDENADO.json
+
+# Patches sueltos de sesiones de debugging
+*.patch
+
+# Datos de aprendizaje / temporales
+learning/
+temp/
