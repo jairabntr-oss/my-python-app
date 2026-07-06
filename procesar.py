@@ -395,16 +395,19 @@ def accion_acelerar(args, ya_backupeado: bool = False) -> int:
     acelerador = AceleradorPausas(ruta)
     resultado = acelerador.acelerar_pausas(pausas, forzar=args.forzar)
 
-    for s in resultado["saltadas"]:
-        print(f"  [!] Saltada {fmt(s['inicio'])}-{fmt(s['fin'])}: {s['motivo']}")
+    if resultado["saltadas"]:
+        print(f"[!] {len(resultado['saltadas'])} de {len(pausas)} pausas NO se "
+              f"pudieron acelerar (video ya editado en ese tramo):")
+        for s in resultado["saltadas"]:
+            print(f"    {fmt(s['inicio'])}-{fmt(s['fin'])}: {s['motivo']}")
 
     if resultado["aplicadas"] == 0:
         print("[X] No se aplico ninguna pausa. El draft NO se modifico.")
         return 1
 
     acelerador.guardar()
-    print(f"[OK] {resultado['aplicadas']} pausas aceleradas, video "
-          f"~{resultado['ahorro_seg']:.1f}s mas corto.")
+    print(f"[OK] {resultado['aplicadas']}/{len(pausas)} pausas aceleradas, "
+          f"video ~{resultado['ahorro_seg']:.1f}s mas corto.")
     print("    Abri CapCut y revisa la timeline ANTES de seguir editando.")
     print("    Si algo se ve mal, restaura el backup de arriba.")
     return 0

@@ -42,7 +42,7 @@ import copy
 import json
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 def _nuevo_id() -> str:
@@ -170,59 +170,90 @@ class AceleradorPausas:
 
     # -- nucleo --------------------------------------------------------------
 
-    def _buscar_segmento_contenedor(self, track: dict, p1: int, p2: int):
+    def _segmentos_en_rango(self, track: dict, p1: int, p2: int) -> List[int]:
+        """Indices (en orden) de los segmentos del track que se
+        SUPERPONEN con [p1,p2). Puede ser 1 o varios: si el video ya
+        tenia cortes existentes dentro de la pausa (comun en material
+        real ya editado - zooms, color grading, transiciones), la pausa
+        cae sobre mas de un segmento."""
+        indices = []
         for i, seg in enumerate(track.get("segments", [])):
             t = seg.get("target_timerange") or {}
             ini, dur = int(t.get("start", 0)), int(t.get("duration", 0))
-            if ini <= p1 and p2 <= ini + dur:
-                return i, seg
-        return None, None
+            fin = ini + dur
+            if fin > p1 and ini < p2:
+                indices.append(i)
+        return indices
 
-    def _partir_y_acelerar(self, track: dict, idx: int, seg: dict,
-                           p1: int, p2: int, velocidad: float) -> int:
-        """Parte seg en [antes][pausa@k][despues]. Devuelve el tiempo
-        ahorrado en us."""
-        if abs(float(seg.get("speed", 1.0)) - 1.0) > 1e-6:
-            raise PausaNoAplicable(
-                "el segmento que contiene la pausa ya tiene velocidad != 1.0")
-        if seg.get("common_keyframes"):
-            raise PausaNoAplicable(
-                "el segmento que contiene la pausa tiene keyframes")
-
-        t = seg["target_timerange"]
-        s = seg["source_timerange"]
-        t_ini, t_dur = int(t["start"]), int(t["duration"])
-        s_ini = int(s["start"])
-
-        o1, o2 = p1 - t_ini, p2 - t_ini          # offsets dentro del segmento
-        dur_pausa = o2 - o1
-        dur_pausa_acelerada = int(round(dur_pausa / velocidad))
-        ahorro = dur_pausa - dur_pausa_acelerada
+    def _partir_y_acelerar(self, track: dict, indices: List[int],
+                           p1: int, p2: int, velocidad: float) -> Tuple[int, List[str]]:
+        """Recorta cada segmento involucrado a su porcion antes/dentro/
+        despues de la pausa; la porcion DENTRO de cada uno se acelera
+        (mismo factor). Soporta 1 o varios segmentos preexistentes
+        cubriendo la pausa. Devuelve el tiempo ahorrado en us."""
+        segs = [track["segments"][i] for i in indices]
+        for seg in segs:
+            if abs(float(seg.get("speed", 1.0)) - 1.0) > 1e-6:
+                raise PausaNoAplicable(
+                    "un segmento dentro de la pausa ya tiene velocidad != 1.0")
+            if seg.get("common_keyframes"):
+                raise PausaNoAplicable(
+                    "un segmento dentro de la pausa tiene keyframes "
+                    "(color/efectos) - no se puede partir con seguridad")
 
         piezas = []
-        # ANTES (si la pausa no arranca justo al inicio del segmento)
-        if o1 > 0:
-            a = self._clonar_segmento(seg)
-            a["target_timerange"] = {"start": t_ini, "duration": o1}
-            a["source_timerange"] = {"start": s_ini, "duration": o1}
-            piezas.append(a)
-        # PAUSA acelerada
-        m = self._clonar_segmento(seg)
-        m["target_timerange"] = {"start": t_ini + o1,
-                                 "duration": dur_pausa_acelerada}
-        m["source_timerange"] = {"start": s_ini + o1, "duration": dur_pausa}
-        self._set_speed(m, velocidad)
-        piezas.append(m)
-        # DESPUES
-        if o2 < t_dur:
-            d = self._clonar_segmento(seg)
-            d["target_timerange"] = {"start": t_ini + o1 + dur_pausa_acelerada,
-                                     "duration": t_dur - o2}
-            d["source_timerange"] = {"start": s_ini + o2, "duration": t_dur - o2}
-            piezas.append(d)
+        cursor_target = None  # posicion donde arranca la proxima pieza
+        ahorro_total = 0
 
-        track["segments"][idx:idx + 1] = piezas
-        return ahorro
+        for seg in segs:
+            t = seg["target_timerange"]
+            s = seg["source_timerange"]
+            t_ini, t_dur = int(t["start"]), int(t["duration"])
+            s_ini = int(s["start"])
+            t_fin = t_ini + t_dur
+
+            if cursor_target is None:
+                cursor_target = t_ini
+
+            # Parte ANTES de la pausa (solo puede existir en el PRIMER
+            # segmento involucrado, si arranca antes de p1)
+            ini_pausa_local = max(t_ini, p1)
+            if t_ini < ini_pausa_local:
+                dur_antes = ini_pausa_local - t_ini
+                a = self._clonar_segmento(seg)
+                a["target_timerange"] = {"start": cursor_target, "duration": dur_antes}
+                a["source_timerange"] = {"start": s_ini, "duration": dur_antes}
+                piezas.append(a)
+                cursor_target += dur_antes
+
+            # Parte DENTRO de la pausa (la porcion de ESTE segmento que
+            # cae en [p1,p2)) - se acelera
+            fin_pausa_local = min(t_fin, p2)
+            dur_dentro = fin_pausa_local - ini_pausa_local
+            if dur_dentro > 0:
+                offset_dentro = ini_pausa_local - t_ini
+                dur_acelerada = int(round(dur_dentro / velocidad))
+                m = self._clonar_segmento(seg)
+                m["target_timerange"] = {"start": cursor_target, "duration": dur_acelerada}
+                m["source_timerange"] = {"start": s_ini + offset_dentro, "duration": dur_dentro}
+                self._set_speed(m, velocidad)
+                piezas.append(m)
+                cursor_target += dur_acelerada
+                ahorro_total += dur_dentro - dur_acelerada
+
+            # Parte DESPUES de la pausa (solo puede existir en el
+            # ULTIMO segmento involucrado, si termina despues de p2)
+            if t_fin > fin_pausa_local:
+                dur_despues = t_fin - fin_pausa_local
+                offset_despues = fin_pausa_local - t_ini
+                d = self._clonar_segmento(seg)
+                d["target_timerange"] = {"start": cursor_target, "duration": dur_despues}
+                d["source_timerange"] = {"start": s_ini + offset_despues, "duration": dur_despues}
+                piezas.append(d)
+                cursor_target += dur_despues
+
+        track["segments"][indices[0]:indices[-1] + 1] = piezas
+        return ahorro_total, [p["id"] for p in piezas]
 
     def _ripple(self, desde_us: int, ahorro_us: int, excluir_ids: set,
                 forzar: bool):
@@ -299,15 +330,13 @@ class AceleradorPausas:
             p1, p2 = int(p["inicio"] * 1e6), int(p["fin"] * 1e6)
             hecho = False
             for track in video_tracks:
-                idx, seg = self._buscar_segmento_contenedor(track, p1, p2)
-                if seg is None:
+                indices = self._segmentos_en_rango(track, p1, p2)
+                if not indices:
                     continue
                 try:
-                    ahorro = self._partir_y_acelerar(
-                        track, idx, seg, p1, p2, vel)
-                    nuevos_ids = {s["id"] for s in
-                                  track["segments"][idx:idx + 3]}
-                    self._ripple(p2, ahorro, nuevos_ids, forzar)
+                    ahorro, nuevos_ids = self._partir_y_acelerar(
+                        track, indices, p1, p2, vel)
+                    self._ripple(p2, ahorro, set(nuevos_ids), forzar)
                     self._shift_words(p2, ahorro)
                     ahorro_total += ahorro
                     aplicadas.append(p)
@@ -326,6 +355,58 @@ class AceleradorPausas:
         return {"aplicadas": len(aplicadas), "saltadas": saltadas,
                 "ahorro_seg": ahorro_total / 1e6}
 
+    def _partir_y_eliminar(self, track: dict, indices: List[int],
+                           p1: int, p2: int) -> Tuple[int, List[str]]:
+        """Como _partir_y_acelerar pero sin crear la porcion 'dentro':
+        el tramo [p1,p2) se borra por completo (corte real)."""
+        segs = [track["segments"][i] for i in indices]
+        for seg in segs:
+            if abs(float(seg.get("speed", 1.0)) - 1.0) > 1e-6:
+                raise PausaNoAplicable(
+                    "un segmento dentro de la pausa ya tiene velocidad != 1.0")
+            if seg.get("common_keyframes"):
+                raise PausaNoAplicable(
+                    "un segmento dentro de la pausa tiene keyframes "
+                    "(color/efectos) - no se puede partir con seguridad")
+
+        piezas = []
+        cursor_target = None
+        ahorro_total = 0
+
+        for seg in segs:
+            t = seg["target_timerange"]
+            s = seg["source_timerange"]
+            t_ini, t_dur = int(t["start"]), int(t["duration"])
+            s_ini = int(s["start"])
+            t_fin = t_ini + t_dur
+
+            if cursor_target is None:
+                cursor_target = t_ini
+
+            ini_pausa_local = max(t_ini, p1)
+            if t_ini < ini_pausa_local:
+                dur_antes = ini_pausa_local - t_ini
+                a = self._clonar_segmento(seg)
+                a["target_timerange"] = {"start": cursor_target, "duration": dur_antes}
+                a["source_timerange"] = {"start": s_ini, "duration": dur_antes}
+                piezas.append(a)
+                cursor_target += dur_antes
+
+            fin_pausa_local = min(t_fin, p2)
+            ahorro_total += max(0, fin_pausa_local - ini_pausa_local)
+
+            if t_fin > fin_pausa_local:
+                dur_despues = t_fin - fin_pausa_local
+                offset_despues = fin_pausa_local - t_ini
+                d = self._clonar_segmento(seg)
+                d["target_timerange"] = {"start": cursor_target, "duration": dur_despues}
+                d["source_timerange"] = {"start": s_ini + offset_despues, "duration": dur_despues}
+                piezas.append(d)
+                cursor_target += dur_despues
+
+        track["segments"][indices[0]:indices[-1] + 1] = piezas
+        return ahorro_total, [p["id"] for p in piezas]
+
     def eliminar_pausas(self, pausas: List[dict], forzar: bool = False) -> dict:
         """Como acelerar_pausas pero BORRA el tramo en vez de acelerarlo
         (corte real: la timeline se acorta esa duracion exacta, sin dejar
@@ -341,41 +422,12 @@ class AceleradorPausas:
             p1, p2 = int(p["inicio"] * 1e6), int(p["fin"] * 1e6)
             hecho = False
             for track in video_tracks:
-                idx, seg = self._buscar_segmento_contenedor(track, p1, p2)
-                if seg is None:
+                indices = self._segmentos_en_rango(track, p1, p2)
+                if not indices:
                     continue
                 try:
-                    if abs(float(seg.get("speed", 1.0)) - 1.0) > 1e-6:
-                        raise PausaNoAplicable(
-                            "el segmento ya tiene velocidad != 1.0")
-                    if seg.get("common_keyframes"):
-                        raise PausaNoAplicable(
-                            "el segmento tiene keyframes")
-
-                    t = seg["target_timerange"]
-                    s = seg["source_timerange"]
-                    t_ini, t_dur = int(t["start"]), int(t["duration"])
-                    s_ini = int(s["start"])
-                    o1, o2 = p1 - t_ini, p2 - t_ini
-                    ahorro = o2 - o1
-
-                    piezas = []
-                    if o1 > 0:
-                        a = self._clonar_segmento(seg)
-                        a["target_timerange"] = {"start": t_ini, "duration": o1}
-                        a["source_timerange"] = {"start": s_ini, "duration": o1}
-                        piezas.append(a)
-                    if o2 < t_dur:
-                        d = self._clonar_segmento(seg)
-                        d["target_timerange"] = {
-                            "start": t_ini + o1, "duration": t_dur - o2}
-                        d["source_timerange"] = {
-                            "start": s_ini + o2, "duration": t_dur - o2}
-                        piezas.append(d)
-
-                    track["segments"][idx:idx + 1] = piezas
-                    nuevos_ids = {s["id"] for s in piezas}
-                    self._ripple(p2, ahorro, nuevos_ids, forzar)
+                    ahorro, nuevos_ids = self._partir_y_eliminar(track, indices, p1, p2)
+                    self._ripple(p2, ahorro, set(nuevos_ids), forzar)
                     self._shift_words(p2, ahorro)
                     ahorro_total += ahorro
                     aplicadas.append(p)
