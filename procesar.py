@@ -23,6 +23,7 @@ Reglas que este script hace cumplir SIEMPRE (lecciones del handoff):
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -183,8 +184,16 @@ def accion_clicks(args, ya_backupeado: bool = False) -> int:
         return 1
 
     oraciones = engine.extract_captions_from_draft(args.draft)
+    if not oraciones and getattr(args, "desde_subtitulos", False):
+        from utils.analisis_video import construir_bloques_desde_subtitulos
+        print("[!] No hay auto-caption original: reconstruyendo bloques "
+              "desde los subtitulos ya editados en el draft...")
+        oraciones = construir_bloques_desde_subtitulos(ruta)
     if not oraciones:
         print("[X] No hay oraciones de auto-caption para sincronizar clicks.")
+        if not getattr(args, "desde_subtitulos", False):
+            print("    Si ya editaste/recortaste este draft (el auto-caption")
+            print("    original ya no existe), proba con --desde-subtitulos")
         return 1
 
     modo = "2_por_oracion" if args.modo == "2" else "3_por_oracion"
@@ -400,6 +409,52 @@ def accion_acelerar(args) -> int:
     return 0
 
 
+def accion_dividir(args) -> int:
+    """Divide un draft en N proyectos nuevos independientes, cada uno
+    recortado a un rango de tiempo. Util para partir una entrevista
+    larga en clips publicables por separado."""
+    from core.division import construir_clip, crear_proyecto_nuevo, parsear_rangos
+
+    engine = CapcutEngine()
+    ruta = _verificar_draft_existe(engine, args.draft)
+
+    try:
+        rangos = parsear_rangos(args.rangos)
+    except Exception as e:
+        print(f"[X] No pude interpretar --rangos: {e}")
+        print('    Formato: "0:00-1:05,1:14-1:46" (mm:ss) o "0-65,74-106" (segundos)')
+        return 1
+
+    with open(ruta, "r", encoding="utf-8") as f:
+        data_original = json.load(f)
+    duracion_total = data_original.get("duration", 0) / 1e6
+
+    print(f"Draft original: {duracion_total:.1f}s. Rangos a crear: {len(rangos)}")
+    for sufijo, ini, fin in rangos:
+        marca = "[!] fuera de rango" if fin > duracion_total else ""
+        print(f"  {sufijo}: {ini:.1f}s -> {fin:.1f}s ({fin-ini:.1f}s) {marca}")
+
+    if args.dry_run:
+        print("[DRY RUN] No se creo ningun proyecto nuevo.")
+        return 0
+
+    _aviso_capcut()
+    creados = []
+    for sufijo, ini, fin in rangos:
+        try:
+            recortado, n_textos = construir_clip(
+                data_original, int(ini * 1e6), int(fin * 1e6))
+            destino = crear_proyecto_nuevo(
+                engine.get_drafts_folder(), args.draft, sufijo, recortado)
+            print(f"[OK] {sufijo}: {n_textos} segmentos de texto -> {destino}")
+            creados.append(destino)
+        except (ValueError, FileExistsError, FileNotFoundError) as e:
+            print(f"[X] {sufijo}: {e}")
+
+    print(f"\n{len(creados)}/{len(rangos)} proyectos creados. Abri CapCut para revisarlos.")
+    return 0 if creados else 1
+
+
 def accion_full(args) -> int:
     """limpiar -> subtitulos -> clicks, con UN solo backup al inicio."""
     engine = CapcutEngine()
@@ -464,6 +519,11 @@ def main() -> int:
                           help="Clicks por oracion (default: 2)")
     p_clicks.add_argument("--sonido", help="Ruta al mp3 del click "
                           f"(default: {SONIDO_CLICK_DEFAULT})")
+    p_clicks.add_argument("--desde-subtitulos", action="store_true",
+                          dest="desde_subtitulos",
+                          help="Si no hay auto-caption original (ya editaste/"
+                               "recortaste el draft), reconstruye bloques "
+                               "desde los subtitulos ya puestos en pantalla")
 
     p_full = _con_draft("full", "limpiar + subtitulos + clicks")
     p_full.add_argument("--modo", choices=["2", "3"], default="2")
@@ -501,6 +561,12 @@ def main() -> int:
     p_acel.add_argument("--forzar", action="store_true",
                         help="No abortar si otro track atraviesa una pausa")
 
+    p_div = _con_draft("dividir",
+                       "Divide el draft en N proyectos independientes por rango")
+    p_div.add_argument("--rangos", required=True,
+                       help='Rangos separados por coma: "0:00-1:05,1:14-1:46" '
+                            'o en segundos: "0-65,74-106"')
+
     args = parser.parse_args()
 
     acciones = {
@@ -512,6 +578,7 @@ def main() -> int:
         "full": accion_full,
         "cortes": accion_cortes,
         "acelerar": accion_acelerar,
+        "dividir": accion_dividir,
     }
 
     try:

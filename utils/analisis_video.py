@@ -152,6 +152,60 @@ def detectar_pausas_habla(
     return pausas
 
 
+def construir_bloques_desde_subtitulos(draft_json_path) -> list:
+    """Reconstruye "oraciones" (formato que espera ClickEngine.generate)
+    a partir de los segmentos de texto YA EXISTENTES en el draft, para
+    cuando el auto-caption original ya no esta disponible (el usuario
+    ya recorto y/o edito los subtitulos a mano).
+
+    Agrupa por BLOQUE VISUAL real: un bloque nuevo arranca cuando una
+    palabra empieza en o despues del momento en que el bloque anterior
+    deja de mostrarse en pantalla (no intenta adivinar oraciones
+    gramaticales por pausas, que da cortes erraticos en texto ya
+    editado a mano).
+    """
+    import json as _json
+    with open(draft_json_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    texts_by_id = {t["id"]: t for t in data.get("materials", {}).get("texts", [])}
+    palabras = []
+    for track in data.get("tracks", []):
+        if track.get("type") != "text":
+            continue
+        for seg in track.get("segments", []):
+            mat = texts_by_id.get(seg.get("material_id"))
+            if mat is None:
+                continue
+            try:
+                content = _json.loads(mat["content"])
+            except Exception:
+                continue
+            texto = (content.get("text") or "").strip()
+            if not texto:
+                continue
+            tr = seg["target_timerange"]
+            palabras.append({
+                "word": texto,
+                "start_us": tr["start"],
+                "end_us": tr["start"] + tr["duration"],
+            })
+
+    palabras.sort(key=lambda p: p["start_us"])
+
+    bloques, bloque_actual, fin_max = [], [], None
+    for p in palabras:
+        if fin_max is not None and p["start_us"] >= fin_max:
+            bloques.append(bloque_actual)
+            bloque_actual = []
+            fin_max = None
+        bloque_actual.append(p)
+        fin_max = p["end_us"] if fin_max is None else max(fin_max, p["end_us"])
+    if bloque_actual:
+        bloques.append(bloque_actual)
+    return bloques
+
+
 def clasificar_silencios(
     silencios: List[dict],
     oraciones: List[List[dict]],
