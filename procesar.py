@@ -319,6 +319,87 @@ def accion_cortes(args) -> int:
     return 0
 
 
+def accion_acelerar(args) -> int:
+    """Corta las pausas del habla y las ACELERA (speed ramp) en vez de
+    eliminarlas. Por defecto, la velocidad de cada pausa depende de la
+    frase que la precede: frases largas/densas se aceleran MENOS (dan
+    tiempo a asimilar), frases cortas/relleno se aceleran MAS.
+    EXPERIMENTAL: probar primero en una COPIA del draft y con --dry-run."""
+    from utils.analisis_video import detectar_pausas_habla
+    from core.velocidad import AceleradorPausas, calcular_velocidad_por_importancia
+
+    engine = CapcutEngine()
+    ruta = _verificar_draft_existe(engine, args.draft)
+
+    oraciones = engine.extract_captions_from_draft(args.draft) or []
+    if not oraciones:
+        print("[X] Este draft no tiene auto-caption sin editar: no puedo")
+        print("    ubicar las pausas del habla.")
+        return 1
+
+    manager = DraftManager(ruta)
+    manager.load()
+    duracion = manager.analyze()["duracion_video_seg"]
+
+    pausas = detectar_pausas_habla(
+        oraciones, min_pausa_seg=args.min_silencio,
+        duracion_video_seg=duracion,
+    )
+    if not args.extremos:
+        pausas = [p for p in pausas if p["tipo"] == "entre_frases"]
+
+    if not pausas:
+        print(f"No hay pausas >= {args.min_silencio}s para acelerar.")
+        return 0
+
+    if args.uniforme:
+        pausas = [{**p, "velocidad": args.velocidad} for p in pausas]
+    else:
+        pausas = calcular_velocidad_por_importancia(
+            pausas, oraciones, args.velocidad_min, args.velocidad_max)
+
+    def fmt(seg: float) -> str:
+        m, s = divmod(seg, 60)
+        return f"{int(m):02d}:{s:05.2f}"
+
+    ahorro_teorico = sum(p["duracion"] - p["duracion"] / p["velocidad"]
+                        for p in pausas)
+    modo = f"uniforme {args.velocidad:g}x" if args.uniforme else \
+           f"variable {args.velocidad_min:g}x-{args.velocidad_max:g}x segun frase previa"
+    print(f"Pausas a acelerar ({modo}): {len(pausas)} "
+          f"(ahorro estimado ~{ahorro_teorico:.1f}s)")
+    for p in pausas:
+        detalle = (f", frase previa: {p['palabras_frase_previa']} palabras"
+                  if "palabras_frase_previa" in p else "")
+        print(f"  {fmt(p['inicio'])} -> {fmt(p['fin'])}  "
+              f"({p['duracion']:.1f}s -> {p['duracion']/p['velocidad']:.1f}s "
+              f"@ {p['velocidad']:g}x{detalle})")
+
+    if args.dry_run:
+        print("[DRY RUN] No se escribio nada.")
+        return 0
+
+    _aviso_capcut()
+    _backup(ruta)
+
+    acelerador = AceleradorPausas(ruta)
+    resultado = acelerador.acelerar_pausas(pausas, forzar=args.forzar)
+
+    for s in resultado["saltadas"]:
+        print(f"  [!] Saltada {fmt(s['inicio'])}-{fmt(s['fin'])}: {s['motivo']}")
+
+    if resultado["aplicadas"] == 0:
+        print("[X] No se aplico ninguna pausa. El draft NO se modifico.")
+        return 1
+
+    acelerador.guardar()
+    print(f"[OK] {resultado['aplicadas']} pausas aceleradas, video "
+          f"~{resultado['ahorro_seg']:.1f}s mas corto.")
+    print("    Abri CapCut y revisa la timeline ANTES de seguir editando.")
+    print("    Si algo se ve mal, restaura el backup de arriba.")
+    return 0
+
+
 def accion_full(args) -> int:
     """limpiar -> subtitulos -> clicks, con UN solo backup al inicio."""
     engine = CapcutEngine()
@@ -399,6 +480,27 @@ def main() -> int:
     p_cortes.add_argument("--solo-habla", action="store_true", dest="solo_habla",
                           help="Solo pausas desde transcripcion (rapido, sin ffmpeg)")
 
+    p_acel = _con_draft("acelerar",
+                        "Acelera las pausas del habla (speed ramp) [EXPERIMENTAL]")
+    p_acel.add_argument("--velocidad-min", type=float, default=2.0,
+                        dest="velocidad_min",
+                        help="Velocidad para pausas tras frases densas (default: 2.0)")
+    p_acel.add_argument("--velocidad-max", type=float, default=8.0,
+                        dest="velocidad_max",
+                        help="Velocidad para pausas tras frases cortas (default: 8.0)")
+    p_acel.add_argument("--uniforme", action="store_true",
+                        help="Usar UNA sola velocidad para todas las pausas "
+                             "(ignora la frase previa)")
+    p_acel.add_argument("--velocidad", type=float, default=4.0,
+                        help="Velocidad fija, solo con --uniforme (default: 4.0)")
+    p_acel.add_argument("--min-silencio", type=float, default=1.0,
+                        dest="min_silencio",
+                        help="Duracion minima de pausa en seg (default: 1.0)")
+    p_acel.add_argument("--extremos", action="store_true",
+                        help="Incluir tambien el aire inicial/final del video")
+    p_acel.add_argument("--forzar", action="store_true",
+                        help="No abortar si otro track atraviesa una pausa")
+
     args = parser.parse_args()
 
     acciones = {
@@ -409,6 +511,7 @@ def main() -> int:
         "clicks": accion_clicks,
         "full": accion_full,
         "cortes": accion_cortes,
+        "acelerar": accion_acelerar,
     }
 
     try:
