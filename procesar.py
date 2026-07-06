@@ -328,7 +328,7 @@ def accion_cortes(args) -> int:
     return 0
 
 
-def accion_acelerar(args) -> int:
+def accion_acelerar(args, ya_backupeado: bool = False) -> int:
     """Corta las pausas del habla y las ACELERA (speed ramp) en vez de
     eliminarlas. Por defecto, la velocidad de cada pausa depende de la
     frase que la precede: frases largas/densas se aceleran MENOS (dan
@@ -388,8 +388,9 @@ def accion_acelerar(args) -> int:
         print("[DRY RUN] No se escribio nada.")
         return 0
 
-    _aviso_capcut()
-    _backup(ruta)
+    if not ya_backupeado:
+        _aviso_capcut()
+        _backup(ruta)
 
     acelerador = AceleradorPausas(ruta)
     resultado = acelerador.acelerar_pausas(pausas, forzar=args.forzar)
@@ -456,7 +457,11 @@ def accion_dividir(args) -> int:
 
 
 def accion_full(args) -> int:
-    """limpiar -> subtitulos -> clicks, con UN solo backup al inicio."""
+    """limpiar -> [acelerar] -> subtitulos -> clicks, con UN solo backup
+    al inicio. El paso de acelerar es OPCIONAL (--acelerar) porque
+    modifica la duracion del video; sin el flag, full se comporta igual
+    que siempre (solo formatea subtitulos y agrega clicks, sin achicar
+    el video)."""
     engine = CapcutEngine()
     ruta = _verificar_draft_existe(engine, args.draft)
 
@@ -476,12 +481,23 @@ def accion_full(args) -> int:
         print(f"[OK] Limpieza previa: {resultado['texto']} texto / "
               f"{resultado['audio']} audio")
 
-    # 2. Subtitulos
+    # 2. Acelerar pausas (opcional): tiene que ir ANTES de generar
+    # subtitulos, porque acorta la timeline y corre los timestamps de
+    # las palabras - subtitulos y clicks deben trabajar sobre los
+    # tiempos YA corregidos, no los originales.
+    if getattr(args, "acelerar", False):
+        rc = accion_acelerar(args, ya_backupeado=True)
+        if rc != 0:
+            print("[X] Fallo el paso de acelerar. Se frena antes de "
+                  "generar subtitulos (para no desincronizar todo).")
+            return rc
+
+    # 3. Subtitulos
     rc = accion_subtitulos(args, ya_backupeado=True)
     if rc != 0:
         return rc
 
-    # 3. Clicks
+    # 4. Clicks
     return accion_clicks(args, ya_backupeado=True)
 
 
@@ -525,9 +541,33 @@ def main() -> int:
                                "recortaste el draft), reconstruye bloques "
                                "desde los subtitulos ya puestos en pantalla")
 
-    p_full = _con_draft("full", "limpiar + subtitulos + clicks")
+    p_full = _con_draft("full", "limpiar + [acelerar] + subtitulos + clicks")
     p_full.add_argument("--modo", choices=["2", "3"], default="2")
     p_full.add_argument("--sonido", default=None)
+    p_full.add_argument("--desde-subtitulos", action="store_true",
+                        dest="desde_subtitulos",
+                        help="Para clicks: reconstruir bloques desde "
+                             "subtitulos ya editados si no hay auto-caption")
+    p_full.add_argument("--acelerar", action="store_true",
+                        help="Tambien achicar la duracion acelerando las "
+                             "pausas del habla, ANTES de generar subtitulos")
+    p_full.add_argument("--velocidad-min", type=float, default=2.0,
+                        dest="velocidad_min",
+                        help="Solo con --acelerar (default: 2.0)")
+    p_full.add_argument("--velocidad-max", type=float, default=8.0,
+                        dest="velocidad_max",
+                        help="Solo con --acelerar (default: 8.0)")
+    p_full.add_argument("--min-silencio", type=float, default=1.0,
+                        dest="min_silencio",
+                        help="Solo con --acelerar (default: 1.0)")
+    p_full.add_argument("--uniforme", action="store_true",
+                        help="Solo con --acelerar: una sola velocidad")
+    p_full.add_argument("--velocidad", type=float, default=4.0,
+                        help="Solo con --acelerar --uniforme (default: 4.0)")
+    p_full.add_argument("--extremos", action="store_true",
+                        help="Solo con --acelerar: incluir aire inicial/final")
+    p_full.add_argument("--forzar", action="store_true",
+                        help="Solo con --acelerar: no abortar por superposicion")
 
     p_cortes = _con_draft("cortes", "Sugiere puntos de corte (ffmpeg, sin IA)",
                           con_dry=False)
