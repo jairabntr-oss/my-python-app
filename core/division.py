@@ -113,6 +113,120 @@ def crear_proyecto_nuevo(
     return destino
 
 
+def construir_resumen(data_original: dict, rangos: List[Tuple[int, int]]) -> Tuple[dict, int]:
+    """Arma UN video continuo tomando varios rangos SALTEADOS del
+    original y pegandolos uno detras del otro, en el orden dado.
+
+    A diferencia de construir_clip (un solo rango -> un solo clip),
+    esto es un "resumen"/highlight: cada rango puede caer sobre uno o
+    varios segmentos de video YA EXISTENTES (el material real suele
+    tener cortes previos - zooms, color grading), asi que cada rango
+    se recorta igual que hace core.velocidad._partir_y_acelerar, pero
+    en vez de acelerar la porcion elegida, se la CONSERVA a velocidad
+    normal y se descarta todo lo que quedo afuera de los rangos.
+
+    Devuelve (draft_resumen, cantidad_de_segmentos_de_texto).
+    """
+    data = copy.deepcopy(data_original)
+    duracion_total_original = int(data_original.get("duration", 0))
+
+    for p1, p2 in rangos:
+        if p1 < 0 or p2 > duracion_total_original or p1 >= p2:
+            raise ValueError(
+                f"rango invalido {p1/1e6:.2f}s-{p2/1e6:.2f}s (el original "
+                f"dura {duracion_total_original/1e6:.2f}s)")
+
+    tracks_nuevos = []
+    ids_texto_usados = set()
+    cursor_target = 0
+    duracion_resumen = 0
+
+    for track in data["tracks"]:
+        if track["type"] == "video":
+            piezas_track = []
+            cursor = 0  # se recalcula por rango, ver abajo
+            for p1, p2 in rangos:
+                for seg in track.get("segments", []):
+                    t = seg.get("target_timerange") or {}
+                    t_ini, t_dur = int(t.get("start", 0)), int(t.get("duration", 0))
+                    t_fin = t_ini + t_dur
+                    ini_local = max(t_ini, p1)
+                    fin_local = min(t_fin, p2)
+                    dur_dentro = fin_local - ini_local
+                    if dur_dentro <= 0:
+                        continue  # este segmento no toca este rango
+
+                    s = seg["source_timerange"]
+                    s_ini = int(s["start"])
+                    offset_dentro = ini_local - t_ini
+
+                    pieza = copy.deepcopy(seg)
+                    pieza["id"] = _nuevo_id_local()
+                    pieza["target_timerange"] = {"start": cursor, "duration": dur_dentro}
+                    pieza["source_timerange"] = {
+                        "start": s_ini + offset_dentro, "duration": dur_dentro}
+                    piezas_track.append(pieza)
+                    cursor += dur_dentro
+            track["segments"] = piezas_track
+            tracks_nuevos.append(track)
+            duracion_resumen = max(duracion_resumen, cursor)
+
+        elif track["type"] == "text":
+            piezas_texto = []
+            cursor_texto = 0
+            for p1, p2 in rangos:
+                offset_rango = cursor_texto
+                for seg in track.get("segments", []):
+                    t = seg["target_timerange"]
+                    s_ini_seg, s_fin_seg = t["start"], t["start"] + t["duration"]
+                    if s_ini_seg >= p1 and s_fin_seg <= p2:
+                        nuevo = copy.deepcopy(seg)
+                        nuevo["target_timerange"] = {
+                            "start": (s_ini_seg - p1) + offset_rango,
+                            "duration": t["duration"],
+                        }
+                        piezas_texto.append(nuevo)
+                        ids_texto_usados.add(seg["material_id"])
+                cursor_texto = offset_rango + (p2 - p1)
+            track["segments"] = piezas_texto
+            tracks_nuevos.append(track)
+        else:
+            track["segments"] = []  # audio-narracion aparte, tracks vacios de otro tipo se descartan
+            tracks_nuevos.append(track)
+
+    data["tracks"] = tracks_nuevos
+    data["duration"] = duracion_resumen
+
+    if "materials" in data and "texts" in data["materials"]:
+        data["materials"]["texts"] = [
+            m for m in data["materials"]["texts"] if m["id"] in ids_texto_usados
+        ]
+
+    return data, len(ids_texto_usados)
+
+
+def _nuevo_id_local() -> str:
+    import uuid
+    return str(uuid.uuid4()).upper()
+
+
+def parsear_rangos_resumen(texto_rangos: str) -> List[Tuple[int, int]]:
+    """Parsea "0:26-0:29,0:52-1:03" (mm:ss) a [(inicio_us, fin_us), ...]
+    en el ORDEN dado (asi se controla el orden final del resumen)."""
+    def a_us(token: str) -> int:
+        token = token.strip()
+        if ":" in token:
+            m, s = token.split(":")
+            return int((int(m) * 60 + float(s)) * 1e6)
+        return int(float(token) * 1e6)
+
+    rangos = []
+    for par in texto_rangos.split(","):
+        ini_s, fin_s = par.split("-")
+        rangos.append((a_us(ini_s), a_us(fin_s)))
+    return rangos
+
+
 def parsear_rangos(texto_rangos: str) -> List[Tuple[str, float, float]]:
     """Parsea "0:00-1:05,1:14-1:46,2:00-2:38" o "0-65,74-106" (segundos)
     a [(sufijo, inicio_seg, fin_seg), ...]. El sufijo es "parteN"."""

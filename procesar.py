@@ -413,6 +413,56 @@ def accion_acelerar(args, ya_backupeado: bool = False) -> int:
     return 0
 
 
+def accion_resumen(args) -> int:
+    """Arma UN video nuevo pegando varios rangos SALTEADOS del original,
+    en el orden dado (highlight/resumen). A diferencia de 'dividir' (que
+    crea N proyectos, cada uno un rango continuo), esto concatena todos
+    los rangos en un SOLO proyecto nuevo."""
+    from core.division import construir_resumen, crear_proyecto_nuevo, parsear_rangos_resumen
+
+    engine = CapcutEngine()
+    ruta = _verificar_draft_existe(engine, args.draft)
+
+    try:
+        rangos = parsear_rangos_resumen(args.rangos)
+    except Exception as e:
+        print(f"[X] No pude interpretar --rangos: {e}")
+        print('    Formato: "0:26-0:29,0:52-1:03,1:10-1:15" (mm:ss), en el')
+        print('    orden en que queres que aparezcan en el resumen final.')
+        return 1
+
+    with open(ruta, "r", encoding="utf-8") as f:
+        data_original = json.load(f)
+    duracion_original = data_original.get("duration", 0) / 1e6
+    duracion_resumen = sum(fin - ini for ini, fin in rangos) / 1e6
+
+    print(f"Draft original: {duracion_original:.1f}s. Rangos elegidos: {len(rangos)}")
+    for i, (ini, fin) in enumerate(rangos, 1):
+        m1, s1 = divmod(ini / 1e6, 60)
+        m2, s2 = divmod(fin / 1e6, 60)
+        print(f"  {i}. {int(m1):02d}:{s1:05.2f} -> {int(m2):02d}:{s2:05.2f} "
+              f"({(fin-ini)/1e6:.1f}s)")
+    print(f"Duracion del resumen: ~{duracion_resumen:.1f}s")
+
+    if args.dry_run:
+        print("[DRY RUN] No se creo ningun proyecto nuevo.")
+        return 0
+
+    _aviso_capcut()
+    try:
+        resumen, n_textos = construir_resumen(data_original, rangos)
+        destino = crear_proyecto_nuevo(
+            engine.get_drafts_folder(), args.draft, args.sufijo, resumen)
+        print(f"[OK] Resumen creado: {n_textos} segmentos de texto -> {destino}")
+        print("    Abri CapCut para revisarlo. El auto-caption de las")
+        print("    oraciones conservadas sigue ahi: corre 'full' sobre este")
+        print("    proyecto nuevo para generar subtitulos karaoke + clicks.")
+        return 0
+    except (ValueError, FileExistsError, FileNotFoundError) as e:
+        print(f"[X] {e}")
+        return 1
+
+
 def accion_dividir(args) -> int:
     """Divide un draft en N proyectos nuevos independientes, cada uno
     recortado a un rango de tiempo. Util para partir una entrevista
@@ -610,6 +660,15 @@ def main() -> int:
                        help='Rangos separados por coma: "0:00-1:05,1:14-1:46" '
                             'o en segundos: "0-65,74-106"')
 
+    p_res = _con_draft("resumen",
+                       "Arma UN video pegando varios rangos salteados (highlight)")
+    p_res.add_argument("--rangos", required=True,
+                       help='Rangos en ORDEN, formato mm:ss: '
+                            '"0:26-0:29,0:52-1:03,1:10-1:16"')
+    p_res.add_argument("--sufijo", default="resumen",
+                       help='Nombre del proyecto nuevo sera "DRAFT - sufijo" '
+                            '(default: "resumen")')
+
     args = parser.parse_args()
 
     acciones = {
@@ -622,6 +681,7 @@ def main() -> int:
         "cortes": accion_cortes,
         "acelerar": accion_acelerar,
         "dividir": accion_dividir,
+        "resumen": accion_resumen,
     }
 
     try:
