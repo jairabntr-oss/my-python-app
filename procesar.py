@@ -495,8 +495,6 @@ def accion_resumen(args) -> int:
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         print(f"[X] {e}")
         return 1
-        print(f"[X] {e}")
-        return 1
 
 
 def accion_dividir(args) -> int:

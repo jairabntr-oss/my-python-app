@@ -398,20 +398,6 @@ def parsear_especificaciones_mixtas(texto: str) -> List[dict]:
         ini_s, fin_s = resto.split("-")
         specs.append({"tipo": tipo, "inicio": a_us(ini_s), "fin": a_us(fin_s)})
     return specs
-    """Parsea "0:26-0:29,0:52-1:03" (mm:ss) a [(inicio_us, fin_us), ...]
-    en el ORDEN dado (asi se controla el orden final del resumen)."""
-    def a_us(token: str) -> int:
-        token = token.strip()
-        if ":" in token:
-            m, s = token.split(":")
-            return int((int(m) * 60 + float(s)) * 1e6)
-        return int(float(token) * 1e6)
-
-    rangos = []
-    for par in texto_rangos.split(","):
-        ini_s, fin_s = par.split("-")
-        rangos.append((a_us(ini_s), a_us(fin_s)))
-    return rangos
 
 
 def parsear_rangos(texto_rangos: str) -> List[Tuple[str, float, float]]:
