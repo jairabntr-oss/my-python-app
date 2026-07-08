@@ -411,8 +411,10 @@ def agregar_pista_broll(
         (t for t in resumen["tracks"] if t["type"] == "video"), None)
     nuevo_track = {
         **({k: v for k, v in track_video_base.items() if k != "segments"}
-           if track_video_base else {"type": "video", "name": "AUTO_broll"}),
+           if track_video_base else {"type": "video"}),
+        "id": _nuevo_id_local(),  # CRITICO: cada track necesita su propio id
         "name": "AUTO_broll",
+        "is_default_name": False,
         "segments": segmentos_broll,
     }
 
