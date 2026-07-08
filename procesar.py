@@ -417,48 +417,84 @@ def accion_resumen(args) -> int:
     """Arma UN video nuevo pegando varios rangos SALTEADOS del original,
     en el orden dado (highlight/resumen). A diferencia de 'dividir' (que
     crea N proyectos, cada uno un rango continuo), esto concatena todos
-    los rangos en un SOLO proyecto nuevo."""
-    from core.division import construir_resumen, crear_proyecto_nuevo, parsear_rangos_resumen
+    los rangos en un SOLO proyecto nuevo.
+
+    Cada rango puede llevar un prefijo:
+      cortar:0:26-0:29     -> se extrae tal cual (default si no hay prefijo)
+      acelerar:0:00-1:36   -> se CONSERVA todo el contenido hablado, pero
+                              se comprimen los silencios (igual que el
+                              comando 'acelerar' independiente)
+    """
+    from core.division import (
+        construir_resumen, construir_resumen_mixto,
+        crear_proyecto_nuevo, parsear_especificaciones_mixtas,
+    )
 
     engine = CapcutEngine()
     ruta = _verificar_draft_existe(engine, args.draft)
 
     try:
-        rangos = parsear_rangos_resumen(args.rangos)
+        specs = parsear_especificaciones_mixtas(args.rangos)
     except Exception as e:
         print(f"[X] No pude interpretar --rangos: {e}")
-        print('    Formato: "0:26-0:29,0:52-1:03,1:10-1:15" (mm:ss), en el')
-        print('    orden en que queres que aparezcan en el resumen final.')
+        print('    Formato: "cortar:0:26-0:29,acelerar:0:00-1:36" (mm:ss),')
+        print('    en el orden en que queres que aparezcan en el resumen.')
         return 1
+
+    hay_acelerar = any(s["tipo"] == "acelerar" for s in specs)
 
     with open(ruta, "r", encoding="utf-8") as f:
         data_original = json.load(f)
     duracion_original = data_original.get("duration", 0) / 1e6
-    duracion_resumen = sum(fin - ini for ini, fin in rangos) / 1e6
 
-    print(f"Draft original: {duracion_original:.1f}s. Rangos elegidos: {len(rangos)}")
-    for i, (ini, fin) in enumerate(rangos, 1):
-        m1, s1 = divmod(ini / 1e6, 60)
-        m2, s2 = divmod(fin / 1e6, 60)
-        print(f"  {i}. {int(m1):02d}:{s1:05.2f} -> {int(m2):02d}:{s2:05.2f} "
-              f"({(fin-ini)/1e6:.1f}s)")
-    print(f"Duracion del resumen: ~{duracion_resumen:.1f}s")
+    print(f"Draft original: {duracion_original:.1f}s. Tramos elegidos: {len(specs)}")
+    for i, s in enumerate(specs, 1):
+        m1, s1 = divmod(s["inicio"] / 1e6, 60)
+        m2, s2 = divmod(s["fin"] / 1e6, 60)
+        print(f"  {i}. [{s['tipo']}] {int(m1):02d}:{s1:05.2f} -> "
+              f"{int(m2):02d}:{s2:05.2f} ({(s['fin']-s['inicio'])/1e6:.1f}s)")
+
+    oraciones_completas = None
+    if hay_acelerar:
+        oraciones_completas = engine.extract_captions_from_draft(args.draft)
+        if not oraciones_completas:
+            print("[X] Hay tramos 'acelerar' pero el draft no tiene "
+                  "auto-caption sin editar para calcular las pausas.")
+            return 1
 
     if args.dry_run:
+        # Estimacion rapida: para 'cortar' es exacto, para 'acelerar' es
+        # la duracion CRUDA del tramo (el ahorro real se ve recien al
+        # construir, porque depende de las pausas reales)
+        aprox = sum((s["fin"] - s["inicio"]) for s in specs) / 1e6
+        print(f"Duracion aproximada (sin comprimir pausas de 'acelerar'): "
+              f"~{aprox:.1f}s")
+        if hay_acelerar:
+            print("(los tramos 'acelerar' van a quedar mas cortos una vez "
+                  "aplicada la compresion de pausas - este numero es el techo)")
         print("[DRY RUN] No se creo ningun proyecto nuevo.")
         return 0
 
     _aviso_capcut()
     try:
-        resumen, n_textos = construir_resumen(data_original, rangos)
+        if hay_acelerar:
+            resumen, n_textos = construir_resumen_mixto(
+                data_original, oraciones_completas, specs)
+        else:
+            rangos = [(s["inicio"], s["fin"]) for s in specs]
+            resumen, n_textos = construir_resumen(data_original, rangos)
+
         destino = crear_proyecto_nuevo(
             engine.get_drafts_folder(), args.draft, args.sufijo, resumen)
-        print(f"[OK] Resumen creado: {n_textos} segmentos de texto -> {destino}")
+        print(f"[OK] Resumen creado: {n_textos} segmentos de texto, "
+              f"duracion final {resumen['duration']/1e6:.1f}s -> {destino}")
         print("    Abri CapCut para revisarlo. El auto-caption de las")
         print("    oraciones conservadas sigue ahi: corre 'full' sobre este")
         print("    proyecto nuevo para generar subtitulos karaoke + clicks.")
         return 0
     except (ValueError, FileExistsError, FileNotFoundError) as e:
+        print(f"[X] {e}")
+        return 1
         print(f"[X] {e}")
         return 1
 

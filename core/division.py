@@ -210,7 +210,194 @@ def _nuevo_id_local() -> str:
     return str(uuid.uuid4()).upper()
 
 
-def parsear_rangos_resumen(texto_rangos: str) -> List[Tuple[int, int]]:
+def _extraer_rango_robusto(data_original: dict, p1: int, p2: int) -> dict:
+    """Extrae [p1,p2) a un mini-draft 0-based, soportando que el video ya
+    tenga varios segmentos preexistentes dentro del rango (mismo criterio
+    que construir_resumen). No modifica data_original."""
+    tracks_out = []
+    ids_texto_usados = set()
+
+    for track in data_original["tracks"]:
+        base = {k: v for k, v in track.items() if k != "segments"}
+        if track["type"] == "video":
+            piezas = []
+            cursor = 0
+            for seg in track.get("segments", []):
+                t = seg.get("target_timerange") or {}
+                t_ini, t_dur = int(t.get("start", 0)), int(t.get("duration", 0))
+                t_fin = t_ini + t_dur
+                ini_local, fin_local = max(t_ini, p1), min(t_fin, p2)
+                dur_dentro = fin_local - ini_local
+                if dur_dentro <= 0:
+                    continue
+                s = seg["source_timerange"]
+                s_ini = int(s["start"])
+                offset_dentro = ini_local - t_ini
+                pieza = copy.deepcopy(seg)
+                pieza["id"] = _nuevo_id_local()
+                pieza["target_timerange"] = {"start": cursor, "duration": dur_dentro}
+                pieza["source_timerange"] = {
+                    "start": s_ini + offset_dentro, "duration": dur_dentro}
+                piezas.append(pieza)
+                cursor += dur_dentro
+            tracks_out.append({**copy.deepcopy(base), "segments": piezas})
+        elif track["type"] == "text":
+            piezas = []
+            for seg in track.get("segments", []):
+                t = seg["target_timerange"]
+                s_ini_seg, s_fin_seg = t["start"], t["start"] + t["duration"]
+                if s_ini_seg >= p1 and s_fin_seg <= p2:
+                    nuevo = copy.deepcopy(seg)
+                    nuevo["target_timerange"] = {
+                        "start": s_ini_seg - p1, "duration": t["duration"]}
+                    piezas.append(nuevo)
+                    ids_texto_usados.add(seg["material_id"])
+            tracks_out.append({**copy.deepcopy(base), "segments": piezas})
+        else:
+            tracks_out.append({**copy.deepcopy(base), "segments": []})
+
+    materials = copy.deepcopy(data_original.get("materials", {}))
+    if "texts" in materials:
+        materials["texts"] = [m for m in materials["texts"] if m["id"] in ids_texto_usados]
+
+    return {"duration": p2 - p1, "tracks": tracks_out, "materials": materials}
+
+
+def construir_resumen_mixto(
+    data_original: dict, oraciones_completas: List[List[dict]],
+    especificaciones: List[dict],
+) -> Tuple[dict, int]:
+    """Como construir_resumen, pero cada tramo puede ser:
+      {"tipo": "cortar", "inicio": us, "fin": us}
+        -> se extrae tal cual, sin tocar velocidad.
+      {"tipo": "acelerar", "inicio": us, "fin": us,
+       "velocidad_min": float, "velocidad_max": float, "min_silencio": float}
+        -> se CONSERVA todo el contenido hablado de ese tramo (no se
+        corta ninguna frase), pero se comprimen los SILENCIOS dentro de
+        el con el mismo criterio que el comando 'acelerar' independiente
+        (mas tiempo a pausas tras frases densas, corte fuerte a pausas
+        tras frases cortas).
+
+    oraciones_completas: las oraciones del draft ORIGINAL completo (el
+    mismo formato que devuelve engine.extract_captions_from_draft),
+    usadas para calcular pausas/velocidad solo dentro de cada tramo
+    "acelerar" (se filtran y se re-basan a 0 automaticamente).
+    """
+    import json as _json
+    import os
+    import tempfile
+
+    from core.velocidad import AceleradorPausas, calcular_velocidad_por_importancia
+    from utils.analisis_video import detectar_pausas_habla
+
+    duracion_total_original = int(data_original.get("duration", 0))
+    for spec in especificaciones:
+        p1, p2 = spec["inicio"], spec["fin"]
+        if p1 < 0 or p2 > duracion_total_original or p1 >= p2:
+            raise ValueError(
+                f"rango invalido {p1/1e6:.2f}s-{p2/1e6:.2f}s (el original "
+                f"dura {duracion_total_original/1e6:.2f}s)")
+
+    video_final, texto_final = [], []
+    ids_texto_usados = set()
+    cursor = 0
+
+    for spec in especificaciones:
+        p1, p2 = spec["inicio"], spec["fin"]
+        mini = _extraer_rango_robusto(data_original, p1, p2)
+
+        if spec["tipo"] == "acelerar":
+            oraciones_rango = []
+            for o in oraciones_completas:
+                if o and o[0]["start_us"] >= p1 and o[-1]["end_us"] <= p2:
+                    oraciones_rango.append([
+                        {**w, "start_us": w["start_us"] - p1, "end_us": w["end_us"] - p1}
+                        for w in o
+                    ])
+
+            pausas = detectar_pausas_habla(
+                oraciones_rango, min_pausa_seg=spec.get("min_silencio", 1.0),
+                duracion_video_seg=(p2 - p1) / 1e6)
+            pausas_vel = calcular_velocidad_por_importancia(
+                pausas, oraciones_rango,
+                spec.get("velocidad_min", 2.0), spec.get("velocidad_max", 8.0))
+
+            fd, temp_path = tempfile.mkstemp(suffix=".json")
+            os.close(fd)
+            try:
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    _json.dump(mini, f)
+                ac = AceleradorPausas(temp_path)
+                if pausas_vel:
+                    ac.acelerar_pausas(pausas_vel)
+                mini_final = ac.data
+            finally:
+                os.unlink(temp_path)
+        else:
+            mini_final = mini
+
+        for track in mini_final["tracks"]:
+            if track["type"] == "video":
+                for seg in track.get("segments", []):
+                    seg["target_timerange"]["start"] += cursor
+                    video_final.append(seg)
+            elif track["type"] == "text":
+                for seg in track.get("segments", []):
+                    seg["target_timerange"]["start"] += cursor
+                    texto_final.append(seg)
+                    ids_texto_usados.add(seg["material_id"])
+
+        cursor += int(mini_final["duration"])
+
+    data = copy.deepcopy(data_original)
+    tracks_nuevos = []
+    video_asignado = texto_asignado = False
+    for track in data["tracks"]:
+        if track["type"] == "video" and not video_asignado:
+            track["segments"] = video_final
+            tracks_nuevos.append(track)
+            video_asignado = True
+        elif track["type"] == "text" and not texto_asignado:
+            track["segments"] = texto_final
+            tracks_nuevos.append(track)
+            texto_asignado = True
+        elif track["type"] in ("video", "text"):
+            continue
+        else:
+            track["segments"] = []
+            tracks_nuevos.append(track)
+
+    data["tracks"] = tracks_nuevos
+    data["duration"] = cursor
+
+    if "materials" in data and "texts" in data["materials"]:
+        data["materials"]["texts"] = [
+            m for m in data["materials"]["texts"] if m["id"] in ids_texto_usados
+        ]
+
+    return data, len(ids_texto_usados)
+
+
+def parsear_especificaciones_mixtas(texto: str) -> List[dict]:
+    """Parsea "acelerar:0:00-1:36.26,cortar:2:19.13-2:34.27,..." a una
+    lista de specs para construir_resumen_mixto. Si un rango no trae
+    prefijo, se asume "cortar" (compatibilidad con formato simple)."""
+    def a_us(token: str) -> int:
+        token = token.strip()
+        if ":" in token:
+            m, s = token.split(":")
+            return int((int(m) * 60 + float(s)) * 1e6)
+        return int(float(token) * 1e6)
+
+    specs = []
+    for parte in texto.split(","):
+        parte = parte.strip()
+        tipo, _, resto = parte.partition(":")
+        if tipo not in ("acelerar", "cortar"):
+            tipo, resto = "cortar", parte
+        ini_s, fin_s = resto.split("-")
+        specs.append({"tipo": tipo, "inicio": a_us(ini_s), "fin": a_us(fin_s)})
+    return specs
     """Parsea "0:26-0:29,0:52-1:03" (mm:ss) a [(inicio_us, fin_us), ...]
     en el ORDEN dado (asi se controla el orden final del resumen)."""
     def a_us(token: str) -> int:
