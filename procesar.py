@@ -463,15 +463,21 @@ def accion_resumen(args) -> int:
             return 1
 
     if args.dry_run:
-        # Estimacion rapida: para 'cortar' es exacto, para 'acelerar' es
-        # la duracion CRUDA del tramo (el ahorro real se ve recien al
-        # construir, porque depende de las pausas reales)
         aprox = sum((s["fin"] - s["inicio"]) for s in specs) / 1e6
-        print(f"Duracion aproximada (sin comprimir pausas de 'acelerar'): "
-              f"~{aprox:.1f}s")
+        print(f"Duracion aproximada del narrativo (sin comprimir pausas de "
+              f"'acelerar'): ~{aprox:.1f}s")
         if hay_acelerar:
             print("(los tramos 'acelerar' van a quedar mas cortos una vez "
                   "aplicada la compresion de pausas - este numero es el techo)")
+        if args.broll:
+            from core.division import parsear_especificaciones_mixtas as _parsear_broll
+            rangos_broll = [(s["inicio"], s["fin"]) for s in _parsear_broll(args.broll)]
+            dur_broll = sum(fin - ini for ini, fin in rangos_broll) / 1e6
+            print(f"B-roll en track aparte: ~{dur_broll:.1f}s "
+                  f"(no se reproduce dentro del narrativo, queda a partir "
+                  f"de donde termine)")
+            print(f"Duracion total del proyecto (narrativo tope + b-roll): "
+                  f"~{aprox + dur_broll:.1f}s")
         print("[DRY RUN] No se creo ningun proyecto nuevo.")
         return 0
 
@@ -484,10 +490,26 @@ def accion_resumen(args) -> int:
             rangos = [(s["inicio"], s["fin"]) for s in specs]
             resumen, n_textos = construir_resumen(data_original, rangos)
 
+        dur_narrativa = resumen["duration"] / 1e6
+        dur_broll_total = 0.0
+        if args.broll:
+            from core.division import (
+                agregar_pista_broll,
+                parsear_especificaciones_mixtas as _parsear_broll,
+            )
+            rangos_broll = [(s["inicio"], s["fin"]) for s in _parsear_broll(args.broll)]
+            resumen, dur_broll_us = agregar_pista_broll(
+                resumen, data_original, rangos_broll)
+            dur_broll_total = dur_broll_us / 1e6
+
         destino = crear_proyecto_nuevo(
             engine.get_drafts_folder(), args.draft, args.sufijo, resumen)
-        print(f"[OK] Resumen creado: {n_textos} segmentos de texto, "
-              f"duracion final {resumen['duration']/1e6:.1f}s -> {destino}")
+        print(f"[OK] Resumen creado: {n_textos} segmentos de texto -> {destino}")
+        print(f"    Video narrativo: {dur_narrativa:.1f}s")
+        if args.broll:
+            print(f"    + B-roll en track aparte (AUTO_broll): {dur_broll_total:.1f}s "
+                  f"(arranca en {dur_narrativa:.1f}s, no se reproduce dentro del corte)")
+        print(f"    Duracion total del proyecto: {resumen['duration']/1e6:.1f}s")
         print("    Abri CapCut para revisarlo. El auto-caption de las")
         print("    oraciones conservadas sigue ahi: corre 'full' sobre este")
         print("    proyecto nuevo para generar subtitulos karaoke + clicks.")
@@ -702,6 +724,10 @@ def main() -> int:
     p_res.add_argument("--sufijo", default="resumen",
                        help='Nombre del proyecto nuevo sera "DRAFT - sufijo" '
                             '(default: "resumen")')
+    p_res.add_argument("--broll",
+                       help='Rangos de b-roll a agregar en un TRACK APARTE '
+                            'dentro del mismo proyecto (no proyectos '
+                            'separados), formato "0:26-0:29,1:10-1:15"')
 
     args = parser.parse_args()
 

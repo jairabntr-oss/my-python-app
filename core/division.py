@@ -378,6 +378,52 @@ def construir_resumen_mixto(
     return data, len(ids_texto_usados)
 
 
+def agregar_pista_broll(
+    resumen: dict, data_original: dict, rangos_broll: List[Tuple[int, int]],
+) -> Tuple[dict, int]:
+    """Agrega los b-rolls como un TRACK DE VIDEO NUEVO dentro del MISMO
+    proyecto (no crea proyectos separados). Los clips se ubican uno
+    detras del otro, arrancando justo donde termina el video narrativo
+    principal, para no superponerse visualmente con el corte principal.
+    El usuario los reubica a mano despues en CapCut.
+
+    Devuelve (resumen_actualizado, duracion_broll_total_us).
+    """
+    cursor = int(resumen["duration"])
+    segmentos_broll = []
+
+    for p1, p2 in rangos_broll:
+        if p1 < 0 or p2 > int(data_original.get("duration", 0)) or p1 >= p2:
+            raise ValueError(
+                f"rango de b-roll invalido {p1/1e6:.2f}s-{p2/1e6:.2f}s")
+        mini = _extraer_rango_robusto(data_original, p1, p2)
+        for track in mini["tracks"]:
+            if track["type"] != "video":
+                continue
+            for seg in track.get("segments", []):
+                seg = copy.deepcopy(seg)
+                seg["id"] = _nuevo_id_local()
+                seg["target_timerange"]["start"] += cursor
+                segmentos_broll.append(seg)
+        cursor += (p2 - p1)
+
+    track_video_base = next(
+        (t for t in resumen["tracks"] if t["type"] == "video"), None)
+    nuevo_track = {
+        **({k: v for k, v in track_video_base.items() if k != "segments"}
+           if track_video_base else {"type": "video", "name": "AUTO_broll"}),
+        "name": "AUTO_broll",
+        "segments": segmentos_broll,
+    }
+
+    resumen = copy.deepcopy(resumen)
+    resumen["tracks"].append(nuevo_track)
+    duracion_broll_total = cursor - int(resumen["duration"])
+    resumen["duration"] = cursor
+
+    return resumen, duracion_broll_total
+
+
 def parsear_especificaciones_mixtas(texto: str) -> List[dict]:
     """Parsea "acelerar:0:00-1:36.26,cortar:2:19.13-2:34.27,..." a una
     lista de specs para construir_resumen_mixto. Si un rango no trae
